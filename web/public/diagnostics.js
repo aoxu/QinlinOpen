@@ -1,4 +1,4 @@
-export const BUILD = 'web-poc-diagnostics-v2';
+export const BUILD = 'web-compact-v3';
 export function redact(value, secrets = []) {
   let text = String(value ?? '');
   for (const secret of [...secrets].filter(v => typeof v === 'string' && v.length >= 4).sort((a,b) => b.length-a.length)) {

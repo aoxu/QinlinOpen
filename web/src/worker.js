@@ -82,7 +82,7 @@ export function createWorker(transport = defaultTransport) {
       if (url.pathname === '/api/doors') return reply({doors: await api.doors(session.sessionId)});
       if (url.pathname === '/api/open') {
         if (env.OPEN_ENABLED !== 'true') throw new ApiError('当前仅验证登录和钥匙，真实开门尚未启用', 403);
-        if (typeof body.stableId !== 'string' || body.stableId.length > 200 || body.confirm !== true) throw new ApiError('请明确确认指定钥匙', 400);
+        if (typeof body.stableId !== 'string' || !body.stableId || body.stableId.length > 200) throw new ApiError('请选择有效钥匙', 400);
         if (!(await env.OPEN_LIMIT.limit({key: env.ALLOWED_PHONE})).success) throw new ApiError('请稍后再开门', 429);
         const key = (await api.doors(session.sessionId)).find(k => k.stableId === body.stableId);
         if (!key) throw new ApiError('钥匙不属于当前账号或已失效', 403);

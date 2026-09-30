@@ -19,8 +19,8 @@ function render() {
   $('unlock').hidden = state.unlocked;
   $('login').hidden = !state.unlocked || state.loggedIn;
   $('keys').hidden = !state.loggedIn;
+  $('refresh').hidden = !state.loggedIn;
   $('logout').hidden = !state.unlocked;
-  $('open-note').textContent = state.openEnabled ? '请在门旁操作，发送后现场确认。' : '当前仅验证钥匙列表，真实开门尚未启用。';
   document.querySelectorAll('button').forEach(b => { b.disabled = (busy && !['copy-logs','clear-logs'].includes(b.id)) || (b.dataset.open === '1' && !state.openEnabled) || (b.id === 'sms' && Date.now() < smsUntil); });
 }
 async function api(path, body) {
@@ -56,16 +56,17 @@ async function doors() {
   const data = await api('doors'); $('doors').replaceChildren();
   for (const key of data.doors) {
     const card = document.createElement('div'); card.className = 'door';
+    const info = document.createElement('div'); info.className = 'door-info';
     const title = document.createElement('strong'); title.textContent = key.doorName;
     const community = document.createElement('p'); community.textContent = key.communityName;
     const button = document.createElement('button'); button.textContent = '开门'; button.dataset.open = '1';
     button.addEventListener('click', () => {
-      if (busy || !state.openEnabled || !confirm(`确认请求开启「${key.communityName} ${key.doorName}」？`)) return;
-      void run(async () => { const result = await api('open', {stableId:key.stableId,confirm:true}); message(result.message); });
+      if (busy || !state.openEnabled) return;
+      void run(async () => { const result = await api('open', {stableId:key.stableId}); message(result.message); });
     });
-    card.append(title,community,button); $('doors').append(card);
+    info.append(title,community); card.append(info,button); $('doors').append(card);
   }
-  message(data.doors.length ? `已加载 ${data.doors.length} 把钥匙。` : '账号没有可用钥匙。');
+  message(data.doors.length ? (state.openEnabled ? '' : '开门暂未启用') : '账号没有可用钥匙。');
 }
 $('unlock-form').addEventListener('submit', e => { e.preventDefault(); void run(async () => {
   await api('unlock',{password:$('password').value}); $('password').value = '';

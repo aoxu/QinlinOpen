@@ -84,7 +84,7 @@ test('authorized open checks current keys, posts exactly once, and reports reque
     if(url.includes('queryUserDoor')) return upstream([{doorControlId:2,doorName:'测试门'}]);
     return upstream({});
   });
-  const res = await worker.fetch(req('/api/open',{stableId:'1:2',confirm:true},session()),{...env,OPEN_ENABLED:'true'});
+  const res = await worker.fetch(req('/api/open',{stableId:'1:2'},session()),{...env,OPEN_ENABLED:'true'});
   assert.equal(res.status,200); assert.match((await res.json()).message,/现场确认/);
   const opening = calls.filter(c=>c.url.includes('/open/doorcontrol/')); assert.equal(opening.length,1);
   assert.equal(opening[0].options.method,'POST'); assert.equal(opening[0].options.body,'');

@@ -43,7 +43,7 @@ try {
   await call('login',{phone:'13800000000',code:'123456'});
   assert.equal((await call('status')).loggedIn,true);
   assert.equal((await call('doors')).doors[0].stableId,'1:2');
-  assert.match((await call('open',{stableId:'1:2',confirm:true})).message,/现场确认/);
+  assert.match((await call('open',{stableId:'1:2'})).message,/现场确认/);
   await call('logout',{});
   assert.equal((await call('status')).loggedIn,false);
   assert.ok(outgoing.includes('/member/sms/sendSecurityCode'));
