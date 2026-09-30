@@ -6,19 +6,82 @@ import { seal, unseal, cookie } from '../src/session.js';
 import { createWorker } from '../src/worker.js';
 import { createLogBuffer, redact } from '../public/diagnostics.js';
 import { copyText } from '../public/clipboard.js';
+import { DoorPreferences } from '../src/preferences.js';
+import { guardBinding } from './guard-binding.js';
+
+function preferenceBinding() {
+  const objects = new Map();
+  return {idFromName:name=>name,get(name) {
+    if (!objects.has(name)) {
+      const values = new Map();
+      objects.set(name,new DoorPreferences({storage:{get:async key=>structuredClone(values.get(key)),put:async(key,value)=>values.set(key,structuredClone(value))},blockConcurrencyWhile:task=>task()}));
+    }
+    return objects.get(name);
+  }};
+}
 
 const key = '11'.repeat(32);
 const env = {SESSION_KEY:key,ACCESS_PASSWORD:'test-password-long-enough',ALLOWED_PHONE:'13800000000',
   HEX_AES_KEY:'00'.repeat(16),SIGNING_SALT:'test-salt',SMS_APP_ID:'test-app',SMS_APP_SECRET:'test-secret',
-  OPEN_ENABLED:'false',API_LIMIT:{limit:async()=>({success:true})},SMS_LIMIT:{limit:async()=>({success:true})},OPEN_LIMIT:{limit:async()=>({success:true})}};
+  OPEN_ENABLED:'false',DOOR_PREFERENCES:preferenceBinding(),API_LIMIT:{limit:async()=>({success:true})},SMS_LIMIT:{limit:async()=>({success:true})},OPEN_LIMIT:{limit:async()=>({success:true})}};
+env.UNLOCK_LIMIT = env.VERIFY_LIMIT = env.API_LIMIT;
+env.TURNSTILE_SECRET = 'fake-secret'; env.TURNSTILE_SITEKEY = 'fake-sitekey'; env.TURNSTILE_HOSTNAMES = 'poc.example';
+env.UNLOCK_GUARD = guardBinding(env);
 const origin = 'https://poc.example';
 const session = () => cookie(seal({deviceId:'0123456789abcdef',phone:env.ALLOWED_PHONE,sessionId:'fake-session',exp:Date.now()+60000},key));
 function req(path, body, cookieValue, overrides = {}) {
+  if (path === '/api/unlock' && body) body = {turnstileToken:'valid',...body};
   return new Request(origin+path,{method:body === undefined ? 'GET':'POST',
     headers:{Origin:origin,'Content-Type':'application/json','X-Qinlin-Request':'1',...(cookieValue?{Cookie:cookieValue}:{}),...overrides},
     body:body === undefined ? undefined:JSON.stringify(body)});
 }
 function upstream(data) { return new Response(JSON.stringify({success:true,data}),{headers:{'Content-Type':'application/json'}}); }
+
+test('saved selections persist per account; batch starts all valid doors and retains partial failures',async()=>{
+  const starts = []; let release;
+  const gate = new Promise(resolve=>{release=resolve;});
+  const family = {...env,ALLOWED_PHONES:'13800000000,13900000000',OPEN_ENABLED:'true',DOOR_PREFERENCES:preferenceBinding()};
+  let limits=0; family.OPEN_LIMIT={limit:async()=>{limits++;return {success:true};}};
+  const worker=createWorker(async url=>{
+    if(url.includes('communityInfo')) return upstream([{communityId:1}]);
+    if(url.includes('queryUserDoor')) return upstream([{doorControlId:2,doorName:'门 A'},{doorControlId:3,doorName:'门 B'}]);
+    const id=new URL(url).searchParams.get('doorControlId'); starts.push(id);
+    if(starts.length===2) release();
+    await gate;
+    return id==='3' ? Response.json({code:500}) : upstream({});
+  });
+  const call=async(path,body,auth=session())=>worker.fetch(req('/api/'+path,body,auth),family);
+  assert.equal((await call('open-selected',{})).status,400);
+  assert.equal((await call('preferences',{stableId:'1:999',selected:true})).status,403);
+  for(const id of ['1:2','1:3']) assert.equal((await call('preferences',{stableId:id,selected:true})).status,200);
+  assert.equal((await call('open-selected',{automatic:true})).status,403);
+  await call('preferences',{autoOpen:true});
+  assert.deepEqual((await (await call('doors')).json()).preferences,{selectedIds:['1:2','1:3'],autoOpen:true});
+  const other=cookie(seal({deviceId:'other',phone:'13900000000',sessionId:'other-token',exp:Date.now()+60000},key));
+  assert.deepEqual((await (await call('doors',undefined,other)).json()).preferences,{selectedIds:[],autoOpen:false});
+  const result=await (await call('open-selected',{automatic:true})).json();
+  assert.deepEqual(starts.sort(),['2','3']); assert.equal(limits,1);
+  assert.deepEqual(result.results.map(r=>r.ok),[true,false]);
+  await call('preferences',{stableId:'1:2',selected:false});
+  assert.deepEqual((await (await call('doors')).json()).preferences.selectedIds,['1:3']);
+});
+
+test('batch respects disabled opening, rate limits and expired-key validation',async()=>{
+  const binding=preferenceBinding();
+  await binding.get(env.ALLOWED_PHONE).fetch(new Request('https://internal',{method:'POST',body:JSON.stringify({stableId:'1:2',selected:true})}));
+  let openings=0;
+  const worker=createWorker(async url=>{
+    if(url.includes('communityInfo')) return upstream([{communityId:1}]);
+    if(url.includes('queryUserDoor')) return upstream([{doorControlId:2}]);
+    openings++; return upstream({});
+  });
+  const configured={...env,DOOR_PREFERENCES:binding};
+  assert.equal((await worker.fetch(req('/api/open-selected',{},session()),configured)).status,403);
+  assert.equal((await worker.fetch(req('/api/open-selected',{},session()),{...configured,OPEN_ENABLED:'true',OPEN_LIMIT:{limit:async()=>({success:false})}})).status,429);
+  const noKeys=createWorker(async()=>upstream([]));
+  assert.equal((await noKeys.fetch(req('/api/open-selected',{},session()),{...configured,OPEN_ENABLED:'true'})).status,403);
+  assert.equal(openings,0);
+});
 
 test('Java form encoding preserves colon, encodes special characters and sorts fields',()=>{
   assert.equal(encodeQuery({z:'a b:c+!',a:"~*'()"}), 'a=%7E*%27%28%29&z=a+b:c%2B%21');

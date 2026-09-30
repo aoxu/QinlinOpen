@@ -3,9 +3,12 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>亲邻开门</title><link rel="stylesheet" href="/style.css"><script src="/app.js" type="module"></script></head>
 <body><main>
 <header><h1>亲邻开门</h1><button id="refresh" class="secondary" hidden>刷新</button></header>
-<section id="unlock"><h2>访问验证</h2><form id="unlock-form"><label>访问密码<input id="password" type="password" autocomplete="current-password" required minlength="16"></label><button>进入</button></form></section>
+<button id="open-selected" class="primary-open" data-open="1" hidden>开门已选</button>
+<section id="unlock"><h2>访问验证</h2><form id="unlock-form"><label>访问密码<input id="password" type="password" autocomplete="current-password" required minlength="16" maxlength="1024"></label><div id="turnstile-widget" aria-label="安全验证"></div><p id="verification-status" role="status">正在准备安全验证…</p><button id="unlock-submit" disabled>进入</button></form></section>
 <section id="login" hidden><h2>短信登录</h2><form id="login-form"><label>手机号<input id="phone" type="tel" inputmode="numeric" autocomplete="tel" pattern="1[0-9]{10}" maxlength="11" required></label><label>验证码<input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{1,8}" required></label><div class="actions"><button id="sms" type="button" class="secondary">发送验证码</button><button>登录</button></div></form></section>
 <section id="keys" aria-label="门禁钥匙" hidden><div id="doors"></div></section>
 <p id="message" role="status" aria-live="polite">正在检查会话…</p>
+<ul id="batch-results" aria-live="polite"></ul>
+<section id="settings" hidden><h2>设置</h2><label class="toggle"><input id="auto-open" type="checkbox" role="switch">进入页面自动开门已选</label><p>默认关闭。开启后，每次加载或刷新网页自动发送一次已选门的开门请求；切回已有页面或刷新钥匙列表不会触发。选择和设置按账号保存在服务器。</p></section>
 <details id="tools"><summary>日志与设置</summary><section id="diagnostics"><div class="actions"><h2>最近诊断日志</h2><button id="copy-logs" type="button" class="secondary">复制最近日志</button></div><p>最近 80 条脱敏日志，刷新后保留。</p><p id="copy-status" role="status" aria-live="polite"></p><details id="log-details"><summary>查看日志</summary><pre id="log-output" tabindex="0"></pre></details><button id="clear-logs" type="button" class="secondary">清空日志</button></section><button id="logout" class="secondary" hidden>退出登录</button></details>
 </main></body></html>
