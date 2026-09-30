@@ -5,9 +5,13 @@
   "compatibility_date": "2026-09-30",
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
-  "vars": { "OPEN_ENABLED": "true" },
+  "vars": { "OPEN_ENABLED": "true", "TURNSTILE_HOSTNAMES": "your-app.example.com", "TURNSTILE_SITEKEY": "REPLACE_WITH_YOUR_TURNSTILE_SITEKEY" },
+  "durable_objects": { "bindings": [{ "name": "DOOR_PREFERENCES", "class_name": "DoorPreferences" },{ "name": "UNLOCK_GUARD", "class_name": "UnlockGuard" }] },
+  "migrations": [{ "tag": "v1-door-preferences", "new_sqlite_classes": ["DoorPreferences"] },{ "tag": "v2-unlock-guard", "new_sqlite_classes": ["UnlockGuard"] }],
   "ratelimits": [
     { "name": "API_LIMIT", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
+    { "name": "UNLOCK_LIMIT", "namespace_id": "1004", "simple": { "limit": 5, "period": 60 } },
+    { "name": "VERIFY_LIMIT", "namespace_id": "1005", "simple": { "limit": 30, "period": 60 } },
     { "name": "SMS_LIMIT", "namespace_id": "1002", "simple": { "limit": 1, "period": 60 } },
     { "name": "OPEN_LIMIT", "namespace_id": "1003", "simple": { "limit": 1, "period": 10 } }
   ],

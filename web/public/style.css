@@ -18,6 +18,12 @@ button:disabled{opacity:.5;cursor:wait}
 .door{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:88px;padding:16px 0;border-bottom:1px solid #e6ece8}
 .door:last-child{border-bottom:0}
 .door-info{min-width:0}
+.door-info{flex:1}
+.door-selection,.toggle input{display:inline-block;width:24px;height:24px;margin:0;padding:0;flex:none;accent-color:#176950}
+.toggle{display:flex;align-items:center;gap:12px;margin-bottom:0;min-height:44px}
+.primary-open{width:100%;min-height:64px;font-size:22px;font-weight:700;margin-bottom:16px}
+#settings p,#batch-results{font-size:14px;line-height:1.6}
+#batch-results:empty{display:none}
 .door strong{display:block;font-size:17px;line-height:1.4;overflow-wrap:anywhere}
 .door p{margin:4px 0 0;font-size:13px}
 .door button{flex:none;min-width:76px}

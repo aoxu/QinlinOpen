@@ -1,12 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, boundedText, defaultTransport, QinlinApi } from './protocol.js';
-import { cookie, equalSecret, readSession, seal } from './session.js';
+import { cookie, readSession, seal } from './session.js';
+import { unlockIdentity } from './unlock-guard.js';
 import { DiagnosticLog, errorDetails } from './diagnostics.js';
+export { DoorPreferences } from './preferences.js';
+export { UnlockGuard } from './unlock-guard.js';
+
+async function preferences(env, phone, update) {
+  if (!env.DOOR_PREFERENCES) throw new ApiError('钥匙设置存储尚未配置', 503);
+  const stub = env.DOOR_PREFERENCES.get(env.DOOR_PREFERENCES.idFromName(phone));
+  const response = await stub.fetch(new Request('https://preferences.internal/', update === undefined ? {} : {
+    method:'POST', body:JSON.stringify(update)
+  }));
+  const data = await response.json();
+  if (!response.ok) throw new ApiError(data.error || '设置保存失败', response.status);
+  return data;
+}
 
 const securityHeaders = {
   'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 };
 function json(data, status = 200, setCookie) {
   const headers = { ...securityHeaders, 'Content-Type': 'application/json; charset=utf-8' };
@@ -16,14 +30,15 @@ function json(data, status = 200, setCookie) {
 function configured(env) {
   return /^[a-f\d]{64}$/i.test(env.SESSION_KEY ?? '') && (env.ACCESS_PASSWORD?.length ?? 0) >= 16
     && allowedPhones(env).length > 0 && /^[a-f\d]{32}$/i.test(env.HEX_AES_KEY ?? '')
-    && env.SIGNING_SALT && env.SMS_APP_ID && env.SMS_APP_SECRET && env.API_LIMIT && env.SMS_LIMIT && env.OPEN_LIMIT;
+    && env.SIGNING_SALT && env.SMS_APP_ID && env.SMS_APP_SECRET && env.API_LIMIT && env.SMS_LIMIT && env.OPEN_LIMIT
+    && env.UNLOCK_LIMIT && env.VERIFY_LIMIT && env.UNLOCK_GUARD && env.TURNSTILE_SECRET && env.TURNSTILE_SITEKEY && env.TURNSTILE_HOSTNAMES;
 }
 function allowedPhones(env) {
   const phones = (env.ALLOWED_PHONES ?? env.ALLOWED_PHONE ?? '').split(',').map(v=>v.trim());
   return phones.every(v=>/^1\d{10}$/.test(v)) ? [...new Set(phones)] : [];
 }
 const ACCESS_MS = 90 * 86400000;
-const methods = { '/api/status': 'GET', '/api/unlock': 'POST', '/api/sms': 'POST', '/api/login': 'POST', '/api/doors': 'GET', '/api/open': 'POST', '/api/logout': 'POST' };
+const methods = { '/api/status': 'GET', '/api/unlock': 'POST', '/api/sms': 'POST', '/api/login': 'POST', '/api/doors': 'GET', '/api/open': 'POST', '/api/logout': 'POST', '/api/preferences':'POST', '/api/open-selected':'POST' };
 export function createWorker(transport = defaultTransport) {
   return { async fetch(request, env) {
     const url = new URL(request.url);
@@ -61,18 +76,37 @@ export function createWorker(transport = defaultTransport) {
         if (!request.headers.get('Content-Type')?.startsWith('application/json')) throw new ApiError('仅接受 JSON 请求', 415);
       }
       const rateKey = session?.phone ? `account:${session.phone}` : `ip:${request.headers.get('CF-Connecting-IP') ?? 'local'}`;
+      const ip = request.headers.get('CF-Connecting-IP') ?? 'local';
+      if (url.pathname === '/api/unlock' && !(await env.UNLOCK_LIMIT.limit({key:`unlock:${ip}`})).success) {
+        const result = reply({error:'访问验证过于频繁，请 60 秒后再试',retryAfter:60},429);
+        result.headers.set('Retry-After','60'); return result;
+      }
       const { success } = await env.API_LIMIT.limit({key: rateKey});
       if (!success) throw new ApiError('操作过于频繁，请稍后再试', 429);
-      if (url.pathname === '/api/status') return reply({ unlocked: Boolean(session), loggedIn: Boolean(session?.sessionId), openEnabled: env.OPEN_ENABLED === 'true' });
+      if (url.pathname === '/api/status') return reply({ unlocked: Boolean(session), loggedIn: Boolean(session?.sessionId), openEnabled: env.OPEN_ENABLED === 'true', ...(!session ? {turnstileSitekey:env.TURNSTILE_SITEKEY} : {}) });
       let body = {};
       if (request.method === 'POST') {
         try { body = JSON.parse(await boundedText(request.body, 4096)); }
         catch { throw new ApiError('请求格式错误或过大', 400); }
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError('请求格式错误', 400);
-        diagnostics.protect(body.password,body.phone,body.code,body.stableId);
+        diagnostics.protect(body.password,body.phone,body.code,body.stableId,body.turnstileToken);
       }
       if (url.pathname === '/api/unlock') {
-        if (typeof body.password !== 'string' || !equalSecret(body.password, env.ACCESS_PASSWORD)) throw new ApiError('访问密码错误', 401);
+        if (typeof body.password !== 'string' || body.password.length > 1024) throw new ApiError('访问密码格式错误',400);
+        if (typeof body.turnstileToken !== 'string' || !body.turnstileToken || body.turnstileToken.length > 2048) throw new ApiError('请先完成安全验证',403);
+        if (!(await env.VERIFY_LIMIT.limit({key:'qinlin-unlock-verifications'})).success) {
+          const result = reply({error:'安全验证繁忙，请 60 秒后再试',retryAfter:60},429);
+          result.headers.set('Retry-After','60'); return result;
+        }
+        const identity = unlockIdentity(ip,env.SESSION_KEY);
+        const guard = env.UNLOCK_GUARD.get(env.UNLOCK_GUARD.idFromName(identity));
+        const validation = await guard.fetch(new Request('https://unlock.internal/',{method:'POST',body:JSON.stringify({password:body.password,token:body.turnstileToken,ip})}));
+        if (!validation.ok) {
+          const data = await validation.json();
+          const result = reply(data,validation.status);
+          if (data.retryAfter) result.headers.set('Retry-After',String(data.retryAfter));
+          return result;
+        }
         session = {...stored,deviceId: stored?.deviceId ?? randomUUID().replaceAll('-', '').slice(0,16), exp: Date.now() + ACCESS_MS};
         stored = session;
         return reply({ok: true}, 200, cookie(seal(session, env.SESSION_KEY)));
@@ -92,8 +126,41 @@ export function createWorker(transport = defaultTransport) {
         return reply({ok: true}, 200, cookie(seal(session, env.SESSION_KEY)));
       }
       if (!session.sessionId) throw new ApiError('请先登录亲邻账号', 401);
+      if (url.pathname === '/api/preferences') {
+        const selection = typeof body.stableId === 'string' && body.stableId.length > 0 && body.stableId.length <= 200 && typeof body.selected === 'boolean';
+        const toggle = typeof body.autoOpen === 'boolean';
+        if (!selection && !toggle) throw new ApiError('设置格式错误',400);
+        if (selection && body.selected) {
+          checkingUpstreamSession = true;
+          if (!(await api.doors(session.sessionId)).some(k=>k.stableId === body.stableId)) throw new ApiError('钥匙不属于当前账号或已失效',403);
+        }
+        return reply({preferences:await preferences(env,session.phone,{
+          ...(selection ? {stableId:body.stableId,selected:body.selected} : {}), ...(toggle ? {autoOpen:body.autoOpen} : {})
+        })});
+      }
       checkingUpstreamSession = true;
-      if (url.pathname === '/api/doors') return reply({doors: await api.doors(session.sessionId)});
+      if (url.pathname === '/api/doors') return reply({doors: await api.doors(session.sessionId), preferences:await preferences(env,session.phone)});
+      if (url.pathname === '/api/open-selected') {
+        if (env.OPEN_ENABLED !== 'true') throw new ApiError('真实开门尚未启用',403);
+        const saved = await preferences(env,session.phone);
+        if (body.automatic === true && !saved.autoOpen) throw new ApiError('自动开门已关闭',403);
+        if (!saved.selectedIds.length) throw new ApiError('请先勾选要开启的门',400);
+        const keys = await api.doors(session.sessionId);
+        const selected = saved.selectedIds.map(id=>({id,key:keys.find(k=>k.stableId===id)}));
+        if (!selected.some(item=>item.key)) throw new ApiError('已选钥匙均已失效，请重新选择',403);
+        if (!(await env.OPEN_LIMIT.limit({key:session.phone})).success) throw new ApiError('请稍后再开门',429);
+        let loginExpired = false;
+        const results = await Promise.all(selected.map(async ({id,key})=>{
+          if (!key) return {stableId:id,ok:false,message:'钥匙已失效或不属于当前账号'};
+          try { await api.open(session.sessionId,key); return {stableId:id,doorName:key.doorName,ok:true,message:'请求已接受，请现场确认'}; }
+          catch(error) {
+            if (error instanceof ApiError && error.status===401) loginExpired = true;
+            return {stableId:id,doorName:key.doorName,ok:false,message:error instanceof ApiError ? error.message : '开门结果未知，请现场确认'};
+          }
+        }));
+        if (loginExpired) session = stored = {...session,sessionId:undefined};
+        return reply({results,loggedIn:!loginExpired});
+      }
       if (url.pathname === '/api/open') {
         if (env.OPEN_ENABLED !== 'true') throw new ApiError('当前仅验证登录和钥匙，真实开门尚未启用', 403);
         if (typeof body.stableId !== 'string' || !body.stableId || body.stableId.length > 200) throw new ApiError('请选择有效钥匙', 400);
@@ -113,7 +180,7 @@ export function createWorker(transport = defaultTransport) {
         setCookie = cookie(seal(stored,env.SESSION_KEY));
       }
       return reply({error: error instanceof ApiError ? error.message : '服务异常，请查看诊断日志',
-        ...(status === 401 ? {unlocked:Boolean(session),loggedIn:false} : {})}, status, setCookie);
+        ...(status === 401 ? {unlocked:Boolean(session),loggedIn:false,...(!session ? {turnstileSitekey:env.TURNSTILE_SITEKEY} : {})} : {})}, status, setCookie);
     }
   }};
 }
