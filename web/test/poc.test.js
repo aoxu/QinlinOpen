@@ -4,6 +4,8 @@ import { createCipheriv, createHash } from 'node:crypto';
 import { encodeQuery, encryptPhone, signFields, QinlinApi } from '../src/protocol.js';
 import { seal, unseal, cookie } from '../src/session.js';
 import { createWorker } from '../src/worker.js';
+import { createLogBuffer, redact } from '../public/diagnostics.js';
+import { copyText } from '../public/clipboard.js';
 
 const key = '11'.repeat(32);
 const env = {SESSION_KEY:key,ACCESS_PASSWORD:'test-password-long-enough',ALLOWED_PHONE:'13800000000',
@@ -56,7 +58,9 @@ test('anonymous requests and non-allowlisted phones cannot call upstream',async(
 test('unlock issues encrypted cookie without disclosing credentials',async()=>{
   const res = await createWorker().fetch(req('/api/unlock',{password:env.ACCESS_PASSWORD}),env);
   assert.equal(res.status,200); assert.match(res.headers.get('Set-Cookie'),/HttpOnly/);
-  assert.deepEqual(await res.json(),{ok:true});
+  const data = await res.json();
+  assert.equal(data.ok,true); assert.match(data.requestId,/^[a-f\d-]{36}$/);
+  assert.ok(!JSON.stringify(data).includes(env.ACCESS_PASSWORD));
 });
 test('SMS and API rate limiter rejection prevents network requests',async()=>{
   const worker = createWorker(()=>{throw new Error('must not fetch');});
@@ -108,4 +112,62 @@ test('oversized request and upstream data are rejected',async()=>{
   assert.equal((await createWorker().fetch(req('/api/unlock',{password:'a'.repeat(5000)}),env)).status,400);
   const api = new QinlinApi(env,'fake',async()=>new Response('x'.repeat(1024*1024+1)));
   await assert.rejects(api.doors('fake'),error=>error.status===413);
+});
+test('network failure includes safe cause and fetch stage, without SMS/open confusion',async()=>{
+  const worker = createWorker(async()=>{throw new TypeError(`fetch failed https://example.com/sms?sessionId=fake-session mobile=${env.ALLOWED_PHONE} code=123456`,{cause:new Error('DNS resolution failed')});});
+  const res = await worker.fetch(req('/api/sms',{phone:env.ALLOWED_PHONE},session()),env);
+  const data = await res.json();
+  assert.equal(res.status,502); assert.match(data.error,/网络请求失败/); assert.ok(!data.error.includes('开门'));
+  const detail = data.diagnostics.find(e=>e.event==='upstream.error');
+  assert.equal(detail.stage,'fetch'); assert.equal(detail.errorName,'TypeError'); assert.equal(detail.causeMessage,'DNS resolution failed');
+  const text = JSON.stringify(data);
+  for(const secret of [env.ALLOWED_PHONE,'fake-session','123456']) assert.ok(!text.includes(secret));
+  assert.ok(!detail.path.includes('?'));
+});
+test('SMS timeout explicitly names timeout and does not retry',async()=>{
+  let calls=0;
+  const worker=createWorker(async()=>{calls++;throw new DOMException('The operation timed out','TimeoutError');});
+  const res=await worker.fetch(req('/api/sms',{phone:env.ALLOWED_PHONE},session()),env);
+  const data=await res.json(); assert.match(data.error,/超时/); assert.equal(calls,1);
+  assert.equal(data.diagnostics.find(e=>e.event==='upstream.error').errorName,'TimeoutError');
+});
+test('HTML, empty, HTTP errors and business rejections have distinct diagnostics',async()=>{
+  for(const [response,expected,event] of [
+    [new Response('<html>private 13800000000 fake-session</html>',{headers:{'Content-Type':'text/html'}}),'非 JSON','upstream.body'],
+    [new Response(''),'空响应','upstream.body'],
+    [new Response('private fake-session',{status:403}),'HTTP 403','upstream.error'],
+    [Response.json({success:false,code:500,message:'mobile=13800000000 token=fake-session captcha required'}),'code=500','upstream.rejected']
+  ]) {
+    const worker=createWorker(async()=>response);
+    const data=await (await worker.fetch(req('/api/sms',{phone:env.ALLOWED_PHONE},session()),env)).json();
+    assert.ok(data.error.includes(expected)); assert.ok(data.diagnostics.some(e=>e.event===event));
+    assert.ok(!JSON.stringify(data).includes('fake-session')); assert.ok(!JSON.stringify(data).includes('13800000000'));
+    assert.ok(!JSON.stringify(data).includes('<html>'));
+  }
+});
+test('recent log buffer caps entries, drops payloads, masks secrets and exports safe JSON',()=>{
+  const logs=createLogBuffer(2);
+  logs.append({event:'first',body:'do not retain',headers:{cookie:'secret'}});
+  logs.append({event:'second',errorMessage:'phone=13800000000 code=123456 https://a.example/x?sessionId=private',payload:'secret'});
+  logs.append({event:'third',errorMessage:'password private-pass'},['private-pass']);
+  const exported=JSON.parse(logs.export()); assert.equal(exported.logs.length,2);
+  assert.equal(exported.logs[0].event,'second');
+  for(const value of ['13800000000','123456','private-pass','sessionId=private','payload']) assert.ok(!logs.export().includes(value));
+  logs.clear(); assert.equal(logs.snapshot().length,0);
+});
+test('clipboard denial falls back to selection and reports manual-copy failure',async()=>{
+  let selected=false,removed=false;
+  const page={createElement:()=>({setAttribute(){},select(){selected=true;},remove(){removed=true;}}),body:{append(){}},execCommand:()=>true};
+  assert.equal(await copyText('safe logs',{clipboard:{writeText:async()=>{throw new Error('denied');}}},page),true);
+  assert.ok(selected&&removed);
+  assert.equal(await copyText('safe logs',{}, {...page,execCommand:()=>false}),false);
+});
+test('Workers-compatible manual redirects stop rather than forwarding credentials',async()=>{
+  let calls=0;
+  const api=new QinlinApi(env,'fake',async(url,options)=>{
+    calls++; assert.equal(options.redirect,'manual');
+    return new Response(null,{status:302,headers:{Location:'https://other.example/?token=fake-session'}});
+  });
+  await assert.rejects(api.sms(env.ALLOWED_PHONE),error=>error.message.includes('重定向'));
+  assert.equal(calls,1);
 });

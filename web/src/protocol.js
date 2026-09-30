@@ -1,8 +1,11 @@
 import { createHash, createCipheriv, randomInt } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { errorDetails } from './diagnostics.js';
+// Keep Workers' native fetch receiver: invoking a stored fetch as this.transport() is illegal.
+export const defaultTransport = (url, options) => globalThis.fetch(url, options);
 
 export class ApiError extends Error {
-  constructor(message, status = 502) { super(message); this.status = status; }
+  constructor(message, status = 502, details = {}) { super(message); this.status = status; this.details = details; }
 }
 export const md5 = value => createHash('md5').update(value, 'utf8').digest('hex').toUpperCase();
 export const nonce = length => Array.from({ length }, () => randomInt(10)).join('');
@@ -64,26 +67,49 @@ export async function boundedText(stream, max = 1024 * 1024) {
   return Buffer.concat(chunks).toString('utf8');
 }
 export class QinlinApi {
-  constructor(env, deviceId, transport = fetch) { this.env = env; this.deviceId = deviceId; this.transport = transport; }
+  constructor(env, deviceId, transport = defaultTransport, diagnostics) { this.env = env; this.deviceId = deviceId; this.transport = transport; this.diagnostics = diagnostics; }
   async request(url, body, contentType = 'application/json; charset=utf-8', headers = {}) {
-    let response;
+    let response, stage = 'fetch';
+    const endpoint = new URL(url), started = Date.now();
+    const isOpen = endpoint.pathname.endsWith('/open/doorcontrol/v2/open');
+    this.diagnostics?.protect(this.deviceId,...endpoint.searchParams.values());
+    const target = {host:endpoint.host,path:endpoint.pathname};
+    this.diagnostics?.add('upstream.start',{...target,stage});
     try {
       response = await this.transport(url, {
-        method: 'POST', body, redirect: 'error', signal: AbortSignal.timeout(8000),
+        method: 'POST', body, redirect: 'manual', signal: AbortSignal.timeout(8000),
         headers: { 'Content-Type': contentType, openid: this.deviceId,
           'User-Agent': 'Dart/3.8 (dart:io)', qversioncode: '3146', qchannel: 'google',
           qplatform: '0', qvendor: 'web', ...headers }
       });
-      if (!response.ok) throw new ApiError('上游 HTTP 请求失败', response.status === 401 ? 401 : 502);
-      const result = JSON.parse(await boundedText(response.body));
+      stage = 'read';
+      this.diagnostics?.add('upstream.response',{...target,stage,upstreamStatus:response.status,contentType:response.headers.get('Content-Type'),elapsedMs:Date.now()-started});
+      if (response.status >= 300 && response.status < 400) {
+        throw new ApiError(`上游要求重定向（HTTP ${response.status}），已停止转发凭据`,502,{upstreamStatus:response.status,errorMessage:'Redirect refused; credentials not forwarded'});
+      }
+      if (!response.ok) throw new ApiError(`上游 HTTP ${response.status}，请求失败`, response.status === 401 ? 401 : 502, {upstreamStatus:response.status});
+      const text = await boundedText(response.body);
+      stage = 'parse';
+      const bodyFormat = !text.trim() ? 'empty' : /^\s*</.test(text) ? 'html/xml' : /^[\s]*[\[{]/.test(text) ? 'json-like' : 'text';
+      this.diagnostics?.add('upstream.body',{...target,stage,responseBytes:Buffer.byteLength(text),bodyFormat});
+      let result;
+      try { result = JSON.parse(text); }
+      catch { throw new ApiError(`上游返回${bodyFormat === 'empty' ? '空响应' : '非 JSON 响应'}（HTTP ${response.status}）`,502,{errorName:'SyntaxError',errorMessage:'JSON.parse rejected upstream payload',bodyFormat}); }
+      stage = 'validate';
+      if (!result || typeof result !== 'object' || Array.isArray(result)) throw new ApiError('上游 JSON 格式不符合协议',502);
       const code = (typeof result.code === 'number' || (typeof result.code === 'string' && /^-?\d+$/.test(result.code))) ? Number(result.code) : NaN;
       if (result.success !== true && code !== 0 && !(code >= 200 && code <= 299)) {
-        throw new ApiError(code === 401 ? '登录已失效，请重新登录' : '亲邻拒绝请求，请检查账号或协议兼容性', code === 401 ? 401 : 502);
+        this.diagnostics?.add('upstream.rejected',{...target,stage,businessCode:Number.isFinite(code)?code:'missing',errorMessage:typeof result.message === 'string' ? result.message : 'No upstream message'});
+        throw new ApiError(code === 401 ? '登录已失效，请重新登录' : `亲邻拒绝请求（code=${Number.isFinite(code)?code:'缺失'}），请查看诊断日志`, code === 401 ? 401 : 502);
       }
+      this.diagnostics?.add('upstream.success',{...target,elapsedMs:Date.now()-started});
       return normalize(result.data);
     } catch (error) {
+      this.diagnostics?.add('upstream.error',{...target,stage,elapsedMs:Date.now()-started,...errorDetails(error),...(error instanceof ApiError ? error.details : {})});
       if (error instanceof ApiError) throw error;
-      throw new ApiError('上游超时或响应异常；若正在开门，结果未知，请现场确认');
+      const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+      const reason = timedOut ? '上游请求超时（8 秒）' : stage === 'fetch' ? '上游网络请求失败' : '上游响应读取失败';
+      throw new ApiError(`${reason}，请查看诊断日志${isOpen ? '；开门结果未知，请现场确认' : ''}`);
     }
   }
   signed(endpoint, sessionId, fields, multipart = false) {

@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>亲邻开门 · Web 验证</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>亲邻开门 · Web 验证</title><link rel="stylesheet" href="/style.css"><script src="/app.js" type="module"></script></head>
 <body><main>
 <header><span class="tag">个人测试版</span><h1>亲邻开门</h1><p>登录你的授权账号，选择需要开启的门。</p></header>
 <section id="unlock"><h2>访问验证</h2><form id="unlock-form"><label>测试访问密码<input id="password" type="password" autocomplete="current-password" required minlength="16"></label><button>进入测试</button></form></section>
@@ -8,5 +8,6 @@
 <section id="keys" hidden><div class="actions"><h2>我的钥匙</h2><button id="refresh" class="secondary">刷新</button></div><p id="open-note"></p><div id="doors"></div></section>
 <button id="logout" class="secondary" hidden>退出并清除本浏览器会话</button>
 <p id="message" role="status" aria-live="polite">正在检查会话…</p>
+<section id="diagnostics"><div class="actions"><h2>最近诊断日志</h2><button id="copy-logs" type="button" class="secondary">复制最近日志</button></div><p>仅记录本标签页最近 80 条脱敏日志，刷新后保留；不记录手机号、验证码、密码或会话令牌。</p><p id="copy-status" role="status" aria-live="polite"></p><details id="log-details"><summary>查看日志</summary><pre id="log-output" tabindex="0"></pre></details><button id="clear-logs" type="button" class="secondary">清空日志</button></section>
 <footer>仅用于本人获授权的账号与门禁。接口返回成功不代表门已实际打开，请现场确认。</footer>
 </main></body></html>
