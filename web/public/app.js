@@ -37,7 +37,7 @@ async function api(path, body) {
   catch { throw new Error(`代理返回非 JSON 响应（HTTP ${response.status}）`); }
   if(Array.isArray(data.diagnostics)) data.diagnostics.forEach(entry=>{ if(entry && typeof entry === 'object') log(entry); });
   stage = 'validate';
-  if (response.status === 401) { state.unlocked = false; state.loggedIn = false; $('doors').replaceChildren(); render(); }
+  if (response.status === 401) { state.unlocked = Boolean(data.unlocked); state.loggedIn = false; $('doors').replaceChildren(); render(); }
   if (!response.ok) throw new Error(`${data.error || '请求失败'}${data.requestId ? `（请求 ${data.requestId}）` : ''}`);
   log({event:'api.success',operation:path,requestId:data.requestId,elapsedMs:Math.round(performance.now()-started)});
   return data;
@@ -70,7 +70,7 @@ async function doors() {
 }
 $('unlock-form').addEventListener('submit', e => { e.preventDefault(); void run(async () => {
   await api('unlock',{password:$('password').value}); $('password').value = '';
-  state = await api('status'); message('已进入测试，请登录亲邻账号。');
+  state = await api('status'); if(state.loggedIn) await doors(); else message('访问验证通过，请登录亲邻账号。');
 }); });
 $('sms').addEventListener('click', () => { if (!$('phone').reportValidity()) return; void run(async () => {
   await api('sms',{phone:$('phone').value}); smsUntil = Date.now()+60000; message('验证码已发送，请查收。');
@@ -92,4 +92,4 @@ $('clear-logs').addEventListener('click', () => {
   $('log-output').textContent = logs.export(); $('copy-status').textContent = '最近日志已清空。';
 });
 setInterval(() => { const left = Math.max(0,Math.ceil((smsUntil-Date.now())/1000)); $('sms').textContent = left ? `${left} 秒后重发` : '发送验证码'; render(); },1000);
-void run(async () => { state = await api('status'); if(state.loggedIn) await doors(); else message(state.unlocked ? '请输入手机号与验证码。' : '请输入测试访问密码。'); });
+void run(async () => { state = await api('status'); if(state.loggedIn) await doors(); else message(state.unlocked ? '请输入手机号与验证码。' : '请输入访问密码。'); });

@@ -15,9 +15,14 @@ function json(data, status = 200, setCookie) {
 }
 function configured(env) {
   return /^[a-f\d]{64}$/i.test(env.SESSION_KEY ?? '') && (env.ACCESS_PASSWORD?.length ?? 0) >= 16
-    && /^1\d{10}$/.test(env.ALLOWED_PHONE ?? '') && /^[a-f\d]{32}$/i.test(env.HEX_AES_KEY ?? '')
+    && allowedPhones(env).length > 0 && /^[a-f\d]{32}$/i.test(env.HEX_AES_KEY ?? '')
     && env.SIGNING_SALT && env.SMS_APP_ID && env.SMS_APP_SECRET && env.API_LIMIT && env.SMS_LIMIT && env.OPEN_LIMIT;
 }
+function allowedPhones(env) {
+  const phones = (env.ALLOWED_PHONES ?? env.ALLOWED_PHONE ?? '').split(',').map(v=>v.trim());
+  return phones.every(v=>/^1\d{10}$/.test(v)) ? [...new Set(phones)] : [];
+}
+const ACCESS_MS = 90 * 86400000;
 const methods = { '/api/status': 'GET', '/api/unlock': 'POST', '/api/sms': 'POST', '/api/login': 'POST', '/api/doors': 'GET', '/api/open': 'POST', '/api/logout': 'POST' };
 export function createWorker(transport = defaultTransport) {
   return { async fetch(request, env) {
@@ -30,12 +35,17 @@ export function createWorker(transport = defaultTransport) {
     }
     const requestId = randomUUID(), started = Date.now();
     const diagnostics = new DiagnosticLog(requestId,Object.values(env).filter(v=>typeof v==='string'));
-    let session = configured(env) ? readSession(request, env.SESSION_KEY) : null;
-    diagnostics.protect(session?.sessionId,session?.deviceId);
+    let stored = configured(env) ? readSession(request, env.SESSION_KEY, true) : null;
+    if (stored?.phone && !allowedPhones(env).includes(stored.phone)) stored = null;
+    // Legacy cookies have no account binding; require a fresh SMS login once.
+    if (stored?.sessionId && !stored.phone) stored = {...stored,sessionId:undefined};
+    let session = stored?.exp > Date.now() ? stored : null, checkingUpstreamSession = false;
+    diagnostics.protect(stored?.sessionId,stored?.deviceId,stored?.phone);
     diagnostics.add('api.start',{operation:url.pathname,colo:request.cf?.colo});
     const reply = (data, status = 200, setCookie) => {
       diagnostics.add('api.complete',{operation:url.pathname,status,elapsedMs:Date.now()-started});
-      const result = json({...data,requestId,...(session?{diagnostics:diagnostics.snapshot()}: {})},status,setCookie);
+      const refreshedCookie = status < 400 && stored ? cookie(seal(stored,env.SESSION_KEY)) : undefined;
+      const result = json({...data,requestId,...(session?{diagnostics:diagnostics.snapshot()}: {})},status,setCookie ?? refreshedCookie);
       result.headers.set('X-Request-ID',requestId);
       return result;
     };
@@ -50,7 +60,8 @@ export function createWorker(transport = defaultTransport) {
         }
         if (!request.headers.get('Content-Type')?.startsWith('application/json')) throw new ApiError('仅接受 JSON 请求', 415);
       }
-      const { success } = await env.API_LIMIT.limit({key: request.headers.get('CF-Connecting-IP') ?? 'local'});
+      const rateKey = session?.phone ? `account:${session.phone}` : `ip:${request.headers.get('CF-Connecting-IP') ?? 'local'}`;
+      const { success } = await env.API_LIMIT.limit({key: rateKey});
       if (!success) throw new ApiError('操作过于频繁，请稍后再试', 429);
       if (url.pathname === '/api/status') return reply({ unlocked: Boolean(session), loggedIn: Boolean(session?.sessionId), openEnabled: env.OPEN_ENABLED === 'true' });
       let body = {};
@@ -62,28 +73,31 @@ export function createWorker(transport = defaultTransport) {
       }
       if (url.pathname === '/api/unlock') {
         if (typeof body.password !== 'string' || !equalSecret(body.password, env.ACCESS_PASSWORD)) throw new ApiError('访问密码错误', 401);
-        session = {deviceId: randomUUID().replaceAll('-', '').slice(0,16), exp: Date.now() + 1800000};
+        session = {...stored,deviceId: stored?.deviceId ?? randomUUID().replaceAll('-', '').slice(0,16), exp: Date.now() + ACCESS_MS};
+        stored = session;
         return reply({ok: true}, 200, cookie(seal(session, env.SESSION_KEY)));
       }
       if (url.pathname === '/api/logout') return reply({ok: true}, 200, cookie('', 0));
       if (!session) throw new ApiError('请先解锁测试页面', 401);
       const api = new QinlinApi(env, session.deviceId, transport, diagnostics);
       if (url.pathname === '/api/sms' || url.pathname === '/api/login') {
-        if (body.phone !== env.ALLOWED_PHONE) throw new ApiError('仅允许配置的测试手机号', 403);
+        if (!allowedPhones(env).includes(body.phone)) throw new ApiError('该手机号未加入家庭白名单', 403);
         if (url.pathname === '/api/sms') {
-          if (!(await env.SMS_LIMIT.limit({key: env.ALLOWED_PHONE})).success) throw new ApiError('验证码发送过于频繁，请稍后再试', 429);
+          if (!(await env.SMS_LIMIT.limit({key: body.phone})).success) throw new ApiError('验证码发送过于频繁，请稍后再试', 429);
           await api.sms(body.phone); return reply({ok: true});
         }
         if (typeof body.code !== 'string' || !/^\d{1,8}$/.test(body.code)) throw new ApiError('请输入有效验证码', 400);
         const sessionId = await api.login(body.phone, body.code);
-        return reply({ok: true}, 200, cookie(seal({...session, sessionId, exp: Date.now() + 1800000}, env.SESSION_KEY)));
+        session = stored = {...session, phone:body.phone, sessionId};
+        return reply({ok: true}, 200, cookie(seal(session, env.SESSION_KEY)));
       }
       if (!session.sessionId) throw new ApiError('请先登录亲邻账号', 401);
+      checkingUpstreamSession = true;
       if (url.pathname === '/api/doors') return reply({doors: await api.doors(session.sessionId)});
       if (url.pathname === '/api/open') {
         if (env.OPEN_ENABLED !== 'true') throw new ApiError('当前仅验证登录和钥匙，真实开门尚未启用', 403);
         if (typeof body.stableId !== 'string' || !body.stableId || body.stableId.length > 200) throw new ApiError('请选择有效钥匙', 400);
-        if (!(await env.OPEN_LIMIT.limit({key: env.ALLOWED_PHONE})).success) throw new ApiError('请稍后再开门', 429);
+        if (!(await env.OPEN_LIMIT.limit({key: session.phone})).success) throw new ApiError('请稍后再开门', 429);
         const key = (await api.doors(session.sessionId)).find(k => k.stableId === body.stableId);
         if (!key) throw new ApiError('钥匙不属于当前账号或已失效', 403);
         await api.open(session.sessionId, key);
@@ -93,8 +107,13 @@ export function createWorker(transport = defaultTransport) {
     } catch (error) {
       const status = error instanceof ApiError ? error.status : 500;
       diagnostics.add('api.error',{operation:url.pathname,stage:'handler',...errorDetails(error)});
-      return reply({error: error instanceof ApiError ? error.message : '服务异常，请查看诊断日志'}, status,
-        status === 401 ? cookie('', 0) : undefined);
+      let setCookie;
+      if (status === 401 && checkingUpstreamSession && session?.sessionId) {
+        session = stored = {...session,sessionId:undefined};
+        setCookie = cookie(seal(stored,env.SESSION_KEY));
+      }
+      return reply({error: error instanceof ApiError ? error.message : '服务异常，请查看诊断日志',
+        ...(status === 401 ? {unlocked:Boolean(session),loggedIn:false} : {})}, status, setCookie);
     }
   }};
 }

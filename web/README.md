@@ -13,7 +13,7 @@ npm ci
 node scripts/setup-local.mjs
 ```
 
-在本机编辑 `.dev.vars`，设置你自己的随机访问密码（至少 16 位）和 `ALLOWED_PHONE`。
+在本机编辑 `.dev.vars`，设置随机访问密码（至少 16 位）和逗号分隔的 `ALLOWED_PHONES`。实际号码只上传为 Cloudflare Secret，禁止提交 Git。
 脚本从现有 Android 源码提取协议常量，并随机生成 32 字节会话密钥，绝不输出这些值。
 `.dev.vars` 已加入忽略规则，切勿上传、截图或分享。
 
@@ -39,7 +39,7 @@ npm run deploy
 ```sh
 npx wrangler secret put SESSION_KEY
 npx wrangler secret put ACCESS_PASSWORD
-npx wrangler secret put ALLOWED_PHONE
+npx wrangler secret put ALLOWED_PHONES
 npx wrangler secret put SIGNING_SALT
 npx wrangler secret put HEX_AES_KEY
 npx wrangler secret put SMS_APP_ID
@@ -73,15 +73,15 @@ Secrets 未齐或限流绑定缺失时，API 返回 503，不请求亲邻。
 ### 其他限制
 
 - 手机界面采用门名与按钮同行布局，日志与退出收进折叠区；390×640 浏览器视口下三把模拟钥匙均可见。
-- 访问密码可以在不同浏览器使用，但当前只允许一个手机号。解锁与短信登录各设置 30 分钟有效期，普通访问不会延长；家用多账号仍需改造手机号白名单、账号限流及长期会话管理。
+- 访问密码可以在不同浏览器使用，但支持逗号分隔的家庭手机号白名单。访问密码通过后固定 90 天有效，普通访问及短信登录不延长；亲邻登录不设本地到期时间，亲邻返回 401 时仅清除亲邻登录，保留访问验证。90 天后输入访问密码可恢复仍有效的亲邻登录。
 
 - 代理地址固定，客户端不能指定任意上游 URL。开门前重新拉取账号钥匙并匹配 stableId；亲邻仍负责最终授权。
 - 请求头延续 Android 协议，但使用随机 16 位设备 ID 和 qvendor=web。兼容性未获官方保证，必须实测。
 - 保持 Java form URL 编码（空格为 +、冒号保留）、大写 MD5、AES-128-ECB/PKCS 填充和 multipart 格式。
-- 会话用 AES-256-GCM 加密存放于 Secure/HttpOnly/SameSite=Strict Cookie，30 分钟过期；JS 不读取上游令牌，不使用 localStorage。
+- 会话用 AES-256-GCM 加密存放于 Secure/HttpOnly/SameSite=Strict Cookie，访问验证 90 天过期；浏览器 Cookie 存储设为 400 天并在成功访问时续存（不延长访问验证），浏览器清理数据仍会丢失登录；JS 不读取上游令牌，不使用 localStorage。
 - 没有会话数据库，退出仅删除当前浏览器 Cookie，不注销亲邻服务端会话，也不能立即撤销已被复制的 Cookie。轮换 SESSION_KEY 可使全部测试 Cookie 失效。
-- 写操作校验同源 Origin、JSON 和自定义请求头。只接受配置的单个手机号。
-- Cloudflare 限流：每 IP 30 次 API/分钟，每手机号 1 次短信/分钟、1 次开门/10秒。限流按 Cloudflare 数据中心执行，是尽力保护，不是全球严格锁或幂等保证。
+- 写操作校验同源 Origin、JSON 和自定义请求头。只接受配置的家庭白名单手机号，移除号码后旧会话不能继续使用。
+- Cloudflare 限流：登录后每账号 30 次 API/分钟，未登录每 IP 30 次 API/分钟，每手机号 1 次短信/分钟、1 次开门/10秒。限流按 Cloudflare 数据中心执行，是尽力保护，不是全球严格锁或幂等保证。
 - 前端操作中禁用按钮；不自动重试短信或开门。不同浏览器/数据中心仍可能同时操作。
 - 上游单请求超时 8 秒；小区最多 20 个；上游响应最多 1 MiB，请求体最多 4 KiB。
 - 未记录个人信息和完整网络请求，Workers observability 默认关闭，API 全部 no-store。上游 sessionId 位于协议要求的 URL，运维时不要开启完整出站 URL 日志。

@@ -12,7 +12,7 @@ const env = {SESSION_KEY:key,ACCESS_PASSWORD:'test-password-long-enough',ALLOWED
   HEX_AES_KEY:'00'.repeat(16),SIGNING_SALT:'test-salt',SMS_APP_ID:'test-app',SMS_APP_SECRET:'test-secret',
   OPEN_ENABLED:'false',API_LIMIT:{limit:async()=>({success:true})},SMS_LIMIT:{limit:async()=>({success:true})},OPEN_LIMIT:{limit:async()=>({success:true})}};
 const origin = 'https://poc.example';
-const session = () => cookie(seal({deviceId:'0123456789abcdef',sessionId:'fake-session',exp:Date.now()+60000},key));
+const session = () => cookie(seal({deviceId:'0123456789abcdef',phone:env.ALLOWED_PHONE,sessionId:'fake-session',exp:Date.now()+60000},key));
 function req(path, body, cookieValue, overrides = {}) {
   return new Request(origin+path,{method:body === undefined ? 'GET':'POST',
     headers:{Origin:origin,'Content-Type':'application/json','X-Qinlin-Request':'1',...(cookieValue?{Cookie:cookieValue}:{}),...overrides},
@@ -97,10 +97,13 @@ test('timeout does not retry and never includes upstream URL or session in error
   await assert.rejects(api.open('fake-session',{communityId:'1',doorControlId:'2'}),error=>error.message.includes('结果未知')&&!error.message.includes('fake-session'));
   assert.equal(calls,1);
 });
-test('upstream 401 clears browser cookie',async()=>{
+test('upstream 401 clears upstream login but retains access password approval',async()=>{
   const worker = createWorker(async()=>new Response(JSON.stringify({code:401}),{status:200}));
   const res = await worker.fetch(req('/api/doors',undefined,session()),env);
-  assert.equal(res.status,401); assert.match(res.headers.get('Set-Cookie'),/Max-Age=0/);
+  assert.equal(res.status,401);
+  const restored = unseal(res.headers.get('Set-Cookie').split(';')[0].split('=')[1],key);
+  assert.equal(restored.sessionId,undefined); assert.equal(restored.phone,env.ALLOWED_PHONE);
+  assert.equal((await res.json()).unlocked,true);
 });
 test('null or missing upstream code does not become a false success',async()=>{
   for (const code of [null,undefined,'']) {
@@ -170,4 +173,55 @@ test('Workers-compatible manual redirects stop rather than forwarding credential
   });
   await assert.rejects(api.sms(env.ALLOWED_PHONE),error=>error.message.includes('重定向'));
   assert.equal(calls,1);
+});
+
+test('90-day access deadline is fixed; expired access preserves login upon password unlock',async()=>{
+  const worker = createWorker(()=>{throw new Error('must not fetch');});
+  const old = {deviceId:'old-device',phone:env.ALLOWED_PHONE,sessionId:'old-token',exp:Date.now()-1};
+  const oldCookie = cookie(seal(old,key));
+  assert.equal((await (await worker.fetch(req('/api/status',undefined,oldCookie),env)).json()).loggedIn,false);
+  assert.equal((await worker.fetch(req('/api/doors',undefined,oldCookie),env)).status,401);
+  const before=Date.now();
+  const response=await worker.fetch(req('/api/unlock',{password:env.ACCESS_PASSWORD},oldCookie),env);
+  const restored=unseal(response.headers.get('Set-Cookie').split(';')[0].split('=')[1],key);
+  assert.equal(restored.sessionId,'old-token'); assert.equal(restored.deviceId,'old-device');
+  assert.ok(restored.exp >= before+90*86400000 && restored.exp <= Date.now()+90*86400000);
+  const status=await worker.fetch(req('/api/status',undefined,response.headers.get('Set-Cookie')),env);
+  assert.equal((await status.json()).loggedIn,true);
+  assert.equal(unseal(status.headers.get('Set-Cookie').split(';')[0].split('=')[1],key).exp,restored.exp);
+});
+
+test('family accounts isolate tokens and rate limits; same account devices share opening limit',async()=>{
+  const phones=['13800000000','13900000000']; const limits={sms:[],api:[],open:[]}; const seen=new Set(); const tokens=[];
+  const family={...env,ALLOWED_PHONES:phones.join(','),OPEN_ENABLED:'true',
+    API_LIMIT:{limit:async({key})=>{limits.api.push(key);return {success:true};}},
+    SMS_LIMIT:{limit:async({key})=>{limits.sms.push(key);return {success:true};}},
+    OPEN_LIMIT:{limit:async({key})=>{limits.open.push(key);const success=!seen.has(key);seen.add(key);return {success};}}};
+  const worker=createWorker(async(url)=>{
+    if(url.includes('sendSecurityCode')) return upstream({});
+    tokens.push(new URL(url).searchParams.get('sessionId'));
+    if(url.includes('communityInfo')) return upstream([{communityId:1}]);
+    if(url.includes('queryUserDoor')) return upstream([{doorControlId:2}]);
+    return upstream({});
+  });
+  const device=(phone,id)=>cookie(seal({deviceId:id,phone,sessionId:`token-${phone}`,exp:Date.now()+86400000},key));
+  for(const phone of phones){
+    assert.equal((await worker.fetch(req('/api/sms',{phone},device(phone,'device-a')),family)).status,200);
+    assert.equal((await worker.fetch(req('/api/open',{stableId:'1:2'},device(phone,'device-a')),family)).status,200);
+  }
+  assert.equal((await worker.fetch(req('/api/open',{stableId:'1:2'},device(phones[0],'device-b')),family)).status,429);
+  assert.deepEqual(limits.sms,phones); assert.deepEqual(limits.open,[...phones,phones[0]]);
+  assert.ok(limits.api.includes(`account:${phones[1]}`));
+  assert.ok(tokens.includes(`token-${phones[0]}`)&&tokens.includes(`token-${phones[1]}`));
+  const removed={...family,ALLOWED_PHONES:phones[0]};
+  assert.equal((await worker.fetch(req('/api/doors',undefined,device(phones[1],'device-a')),removed)).status,401);
+});
+
+test('SMS login preserves password deadline and binds selected phone; malformed allowlist fails closed',async()=>{
+  const worker=createWorker(async()=>upstream({sessionId:'new-token'}));
+  const exp=Date.now()+86400000; const access=cookie(seal({deviceId:'device',exp},key));
+  const response=await worker.fetch(req('/api/login',{phone:env.ALLOWED_PHONE,code:'123456'},access),env);
+  const value=unseal(response.headers.get('Set-Cookie').split(';')[0].split('=')[1],key);
+  assert.equal(value.exp,exp); assert.equal(value.phone,env.ALLOWED_PHONE); assert.equal(value.sessionId,'new-token');
+  assert.equal((await worker.fetch(req('/api/status'),{...env,ALLOWED_PHONES:'invalid'})).status,503);
 });

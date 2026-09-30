@@ -9,6 +9,6 @@ const lines = names.map(name=>{
   if(!value) throw new Error(`找不到协议常量 ${name}`);
   return `${name}=${JSON.stringify(value)}`;
 });
-lines.push(`SESSION_KEY="${randomBytes(32).toString('hex')}"`,'ACCESS_PASSWORD="REPLACE_WITH_AT_LEAST_16_RANDOM_CHARACTERS"','ALLOWED_PHONE="REPLACE_WITH_YOUR_PHONE"');
+lines.push(`SESSION_KEY="${randomBytes(32).toString('hex')}"`,'ACCESS_PASSWORD="REPLACE_WITH_AT_LEAST_16_RANDOM_CHARACTERS"','ALLOWED_PHONES="REPLACE_WITH_YOUR_PHONE"');
 writeFileSync('.dev.vars',lines.join('\n')+'\n',{mode:0o600,flag:'wx'});
-console.log('已生成忽略提交的 .dev.vars。请在本机编辑 ACCESS_PASSWORD 和 ALLOWED_PHONE，勿分享文件内容。');
+console.log('已生成忽略提交的 .dev.vars。请在本机编辑 ACCESS_PASSWORD 和 ALLOWED_PHONES，勿分享文件内容。');
