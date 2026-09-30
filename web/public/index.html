@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>亲邻开门 · Web 验证</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><main>
+<header><span class="tag">个人测试版</span><h1>亲邻开门</h1><p>登录你的授权账号，选择需要开启的门。</p></header>
+<section id="unlock"><h2>访问验证</h2><form id="unlock-form"><label>测试访问密码<input id="password" type="password" autocomplete="current-password" required minlength="16"></label><button>进入测试</button></form></section>
+<section id="login" hidden><h2>短信登录</h2><form id="login-form"><label>手机号<input id="phone" type="tel" inputmode="numeric" autocomplete="tel" pattern="1[0-9]{10}" maxlength="11" required></label><label>验证码<input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{1,8}" required></label><div class="actions"><button id="sms" type="button" class="secondary">发送验证码</button><button>登录</button></div></form></section>
+<section id="keys" hidden><div class="actions"><h2>我的钥匙</h2><button id="refresh" class="secondary">刷新</button></div><p id="open-note"></p><div id="doors"></div></section>
+<button id="logout" class="secondary" hidden>退出并清除本浏览器会话</button>
+<p id="message" role="status" aria-live="polite">正在检查会话…</p>
+<footer>仅用于本人获授权的账号与门禁。接口返回成功不代表门已实际打开，请现场确认。</footer>
+</main></body></html>

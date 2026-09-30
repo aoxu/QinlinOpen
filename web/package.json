@@ -1,0 +1,18 @@
+{
+  "name": "qinlinopen-web-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "node --test test/*.test.js",
+    "test:runtime": "node test/runtime-smoke.mjs",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "miniflare": "^5.20260926.1-alpha",
+    "wrangler": "^4.144.0"
+  }
+}
