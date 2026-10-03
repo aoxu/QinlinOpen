@@ -37,6 +37,116 @@ function req(path, body, cookieValue, overrides = {}) {
 }
 function upstream(data) { return new Response(JSON.stringify({success:true,data}),{headers:{'Content-Type':'application/json'}}); }
 
+test('SMS relogin refreshes only an existing live account binding and preserves its credential and expiry',async()=>{
+  const family={...env,OPEN_ENABLED:'true',ALLOWED_PHONES:'13800000000,13900000000',DOOR_PREFERENCES:preferenceBinding()};
+  const used=[];
+  const worker=createWorker(async url=>{
+    if(url.includes('app/v1/login')) return upstream({sessionId:'new-login-session'});
+    used.push(new URL(url).searchParams.get('sessionId'));
+    if(url.includes('communityInfo')) return upstream([{communityId:1}]);
+    if(url.includes('queryUserDoor')) return upstream([{doorControlId:2}]);
+    return upstream({});
+  });
+  const call=(path,body)=>worker.fetch(req('/api/'+path,body,session()),family);
+  await call('preferences',{stableId:'1:2',selected:true});
+  const {token}=await (await call('shortcut/bind',{})).json();
+  const store=family.DOOR_PREFERENCES.get(env.ALLOWED_PHONE);
+  const read=async()=> (await store.fetch(new Request('https://internal/shortcut'))).json();
+  const before=await read();
+  assert.equal((await call('login',{phone:'13900000000',code:'123456'})).status,200);
+  assert.deepEqual(await read(),before,'another account must not refresh this binding');
+  assert.equal((await call('login',{phone:env.ALLOWED_PHONE,code:'123456'})).status,200);
+  const after=await read();
+  assert.equal(after.id,before.id); assert.equal(after.exp,before.exp);
+  assert.equal(unseal(after.session,key).sessionId,'new-login-session');
+  used.length=0;
+  const response=await worker.fetch(new Request(origin+'/api/shortcut/open-selected',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:'{}'}),family);
+  assert.equal(response.status,200); assert.ok(used.every(v=>v==='new-login-session'));
+  await call('shortcut/revoke',{});
+  await call('login',{phone:env.ALLOWED_PHONE,code:'123456'});
+  assert.equal(await read(),null);
+  const expired={...before,exp:Date.now()-1};
+  await store.fetch(new Request('https://internal/shortcut',{method:'POST',body:JSON.stringify(expired)}));
+  await call('login',{phone:env.ALLOWED_PHONE,code:'123456'});
+  assert.deepEqual(await read(),expired);
+});
+
+test('shortcut binding uses live selections, encrypted credentials, rotation and revocation without cookies',async()=>{
+  const family={...env,OPEN_ENABLED:'true',DOOR_PREFERENCES:preferenceBinding()};
+  const opened=[];
+  const worker=createWorker(async url=>{
+    if(url.includes('communityInfo')) return upstream([{communityId:1}]);
+    if(url.includes('queryUserDoor')) return upstream([{doorControlId:2,doorName:'门 A'},{doorControlId:3,doorName:'门 B'}]);
+    opened.push(new URL(url).searchParams.get('doorControlId')); return upstream({});
+  });
+  const call=(path,body)=>worker.fetch(req('/api/'+path,body,session()),family);
+  const run=(token,body={action:'open-selected'})=>worker.fetch(new Request(origin+'/api/shortcut/open-selected',{
+    method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(body)
+  }),family);
+  assert.equal((await call('shortcut/bind',{})).status,400);
+  await call('preferences',{stableId:'1:2',selected:true});
+  const binding=await (await call('shortcut/bind',{})).json();
+  assert.ok(binding.token); assert.ok(!JSON.stringify(binding).includes('fake-session'));
+  assert.equal(opened.length,0);
+  const res=await run(binding.token);
+  assert.equal(res.status,200); assert.equal(res.headers.has('Set-Cookie'),false);
+  const data=await res.json(); assert.ok(!data.diagnostics); assert.match(data.message,/门 A/);
+  await call('preferences',{stableId:'1:2',selected:false});
+  await call('preferences',{stableId:'1:3',selected:true});
+  assert.equal((await run(binding.token,{automatic:true,stableId:'1:2'})).status,200);
+  assert.deepEqual(opened,['2','3']);
+  const next=await (await call('shortcut/bind',{})).json();
+  assert.equal((await run(binding.token)).status,401);
+  assert.equal((await run(next.token)).status,200);
+  await call('shortcut/revoke',{});
+  const revoked=await run(next.token); assert.equal(revoked.status,401);
+  assert.match((await revoked.json()).message,/撤销/);
+  assert.equal((await (await call('shortcut/status')).json()).bound,false);
+});
+
+test('shortcut rejects wrong purpose, expired/tampered tokens, removed accounts and rate limits',async()=>{
+  const family={...env,OPEN_ENABLED:'true',DOOR_PREFERENCES:preferenceBinding()};
+  let openings=0;
+  const worker=createWorker(async url=>{
+    if(url.includes('communityInfo')) return upstream([{communityId:1}]);
+    if(url.includes('queryUserDoor')) return upstream([{doorControlId:2}]);
+    openings++; return upstream({});
+  });
+  const call=(path,body)=>worker.fetch(req('/api/'+path,body,session()),family);
+  const run=(token,settings=family,method='POST')=>worker.fetch(new Request(origin+'/api/shortcut/open-selected',{
+    method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(method==='POST'?{body:'{}'}:{})
+  }),settings);
+  await call('preferences',{stableId:'1:2',selected:true});
+  const {token}=await (await call('shortcut/bind',{})).json();
+  const decoded=unseal(token,key);
+  for(const bad of ['bad',token.slice(0,-4)+'AAAA',seal({...decoded,exp:Date.now()-1},key),seal({...decoded,purpose:'web'},key),seal({...decoded,phone:'13900000000'},key)]) assert.equal((await run(bad)).status,401);
+  assert.equal((await run(token,{...family,ALLOWED_PHONE:'13900000000'})).status,401);
+  assert.equal((await run(token,{...family,OPEN_ENABLED:'false'})).status,403);
+  assert.equal((await run(token,{...family,OPEN_LIMIT:{limit:async()=>({success:false})}})).status,429);
+  assert.equal((await run(token,family,'GET')).status,405);
+  assert.equal(openings,0);
+  // A bearer credential is deliberately not a browser cookie and cannot manage bindings.
+  assert.equal((await worker.fetch(req('/api/shortcut/revoke',{},undefined,{Authorization:'Bearer '+token}),family)).status,401);
+});
+
+test('upstream login expiry revokes shortcut and prevents repeated opening attempts',async()=>{
+  const family={...env,OPEN_ENABLED:'true',DOOR_PREFERENCES:preferenceBinding()};
+  let expired=false,calls=0;
+  const worker=createWorker(async url=>{
+    calls++;
+    if(expired) return new Response('{}',{status:401});
+    if(url.includes('communityInfo')) return upstream([{communityId:1}]);
+    return upstream([{doorControlId:2}]);
+  });
+  await worker.fetch(req('/api/preferences',{stableId:'1:2',selected:true},session()),family);
+  const {token}=await (await worker.fetch(req('/api/shortcut/bind',{},session()),family)).json();
+  expired=true;
+  const run=()=>worker.fetch(new Request(origin+'/api/shortcut/open-selected',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:'{}'}),family);
+  assert.equal((await run()).status,401);
+  const before=calls;
+  assert.equal((await run()).status,401); assert.equal(calls,before);
+});
+
 test('saved selections persist per account; batch starts all valid doors and retains partial failures',async()=>{
   const starts = []; let release;
   const gate = new Promise(resolve=>{release=resolve;});
@@ -280,11 +390,31 @@ test('family accounts isolate tokens and rate limits; same account devices share
   assert.equal((await worker.fetch(req('/api/doors',undefined,device(phones[1],'device-a')),removed)).status,401);
 });
 
-test('SMS login preserves password deadline and binds selected phone; malformed allowlist fails closed',async()=>{
+test('SMS login renews access deadline and records successful login without leaking credentials',async()=>{
   const worker=createWorker(async()=>upstream({sessionId:'new-token'}));
   const exp=Date.now()+86400000; const access=cookie(seal({deviceId:'device',exp},key));
   const response=await worker.fetch(req('/api/login',{phone:env.ALLOWED_PHONE,code:'123456'},access),env);
   const value=unseal(response.headers.get('Set-Cookie').split(';')[0].split('=')[1],key);
-  assert.equal(value.exp,exp); assert.equal(value.phone,env.ALLOWED_PHONE); assert.equal(value.sessionId,'new-token');
+  assert.ok(value.exp >= Date.now()+90*86400000-1000); assert.equal(value.phone,env.ALLOWED_PHONE); assert.equal(value.sessionId,'new-token');
+  const data = await response.json();
+  assert.equal(data.loginInfo.loggedInAt,value.loggedInAt); assert.equal(data.loginInfo.loginId,value.loginId);
+  assert.ok(!JSON.stringify(data.loginInfo).includes('new-token')); assert.ok(!JSON.stringify(data.loginInfo).includes(env.ALLOWED_PHONE));
   assert.equal((await worker.fetch(req('/api/status'),{...env,ALLOWED_PHONES:'invalid'})).status,503);
+});
+
+test('login observations distinguish upstream rejection, access expiry, and network errors',async()=>{
+  const loggedInAt=Date.now()-3600000;
+  const c=cookie(seal({deviceId:'device',phone:env.ALLOWED_PHONE,sessionId:'token',loginId:'login-test',loggedInAt,exp:Date.now()+60000},key));
+  const worker=createWorker(async()=>Response.json({code:401}));
+  const response=await worker.fetch(req('/api/doors',undefined,c),env);
+  const data=await response.json();
+  assert.equal(data.loginInfo.reason,'upstream_unauthorized'); assert.equal(data.loginInfo.businessCode,401); assert.equal(data.loginInfo.upstreamStatus,200);
+  assert.equal(data.loginInfo.loggedInAt,loggedInAt); assert.ok(data.loginInfo.detectedAt>=loggedInAt+3600000);
+  const next=await (await worker.fetch(req('/api/status',undefined,response.headers.get('Set-Cookie')),env)).json();
+  assert.equal(next.loginInfo.detectedAt,data.loginInfo.detectedAt);
+  const expired=cookie(seal({deviceId:'device',loginId:'login-test',loggedInAt,exp:Date.now()-1},key));
+  assert.equal((await (await worker.fetch(req('/api/status',undefined,expired),env)).json()).loginInfo.reason,'access_expired');
+  const failing=createWorker(async()=>{throw new Error('network failure');});
+  const failure=await (await failing.fetch(req('/api/doors',undefined,c),env)).json();
+  assert.equal(failure.loginInfo.loggedIn,true); assert.equal(failure.loginInfo.reason,undefined);
 });

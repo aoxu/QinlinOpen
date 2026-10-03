@@ -1,6 +1,17 @@
 import { BUILD, createLogBuffer, redact } from './diagnostics.js';
 import { copyText } from './clipboard.js';
+import { HISTORY_KEY, observeLogin, historyText } from './login-history.js';
 const $ = id => document.getElementById(id);
+let loginHistory = [], historyStorageAvailable = true;
+try {
+  const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]');
+  if (Array.isArray(saved)) loginHistory = saved.filter(r=>r && typeof r.id === 'string' && Array.isArray(r.events)).slice(0,50);
+} catch { historyStorageAvailable = false; }
+function showHistory() {
+  $('login-history-output').textContent = historyText(loginHistory);
+  $('login-history-storage').textContent = historyStorageAvailable ? '仅保存在本浏览器，最多 50 次；关闭页面后保留，清除网站数据会删除。时间为北京时间。发现时间不等于实际失效时间；网络错误不会被记为登录失效。' : '浏览器存储不可用，记录仅在当前页面保留。';
+}
+showHistory();
 let state = {unlocked: false, loggedIn: false, openEnabled: false}, busy = false, smsUntil = 0;
 let preferences = {selectedIds:[],autoOpen:false}, currentDoors = [], initialAutoAttempted = false;
 let turnstileToken = '', turnstileWidget, turnstileLoading, unlockUntil = 0;
@@ -74,6 +85,9 @@ async function api(path, body) {
   let data;
   try { data = await response.json(); }
   catch { throw new Error(`代理返回非 JSON 响应（HTTP ${response.status}）`); }
+  loginHistory = observeLogin(loginHistory,data.loginInfo,path,response.ok,data.requestId);
+  try { localStorage.setItem(HISTORY_KEY,JSON.stringify(loginHistory)); } catch { historyStorageAvailable = false; }
+  showHistory();
   if(Array.isArray(data.diagnostics)) data.diagnostics.forEach(entry=>{ if(entry && typeof entry === 'object') log(entry); });
   if (path === 'unlock' && data.retryAfter) unlockUntil = Date.now() + data.retryAfter * 1000;
   stage = 'validate';
@@ -166,6 +180,10 @@ $('copy-logs').addEventListener('click', async () => {
 $('clear-logs').addEventListener('click', () => {
   logs.clear(); try { sessionStorage.removeItem(storageKey); } catch { /* no storage */ }
   $('log-output').textContent = logs.export(); $('copy-status').textContent = '最近日志已清空。';
+});
+$('copy-login-history').addEventListener('click',async()=>{
+  const copied = await copyText(historyText(loginHistory));
+  $('login-history-copy-status').textContent = copied ? '登录记录已复制。' : '请手动选择下方记录复制。';
 });
 setInterval(() => { const left = Math.max(0,Math.ceil((smsUntil-Date.now())/1000)); $('sms').textContent = left ? `${left} 秒后重发` : '发送验证码'; render(); },1000);
 void run(async () => {

@@ -100,7 +100,7 @@ export class QinlinApi {
       const code = (typeof result.code === 'number' || (typeof result.code === 'string' && /^-?\d+$/.test(result.code))) ? Number(result.code) : NaN;
       if (result.success !== true && code !== 0 && !(code >= 200 && code <= 299)) {
         this.diagnostics?.add('upstream.rejected',{...target,stage,businessCode:Number.isFinite(code)?code:'missing',errorMessage:typeof result.message === 'string' ? result.message : 'No upstream message'});
-        throw new ApiError(code === 401 ? '登录已失效，请重新登录' : `亲邻拒绝请求（code=${Number.isFinite(code)?code:'缺失'}），请查看诊断日志`, code === 401 ? 401 : 502);
+        throw new ApiError(code === 401 ? '登录已失效，请重新登录' : `亲邻拒绝请求（code=${Number.isFinite(code)?code:'缺失'}），请查看诊断日志`, code === 401 ? 401 : 502,{upstreamStatus:response.status,businessCode:Number.isFinite(code)?code:null});
       }
       this.diagnostics?.add('upstream.success',{...target,elapsedMs:Date.now()-started});
       return normalize(result.data);

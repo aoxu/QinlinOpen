@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, boundedText, defaultTransport, QinlinApi } from './protocol.js';
-import { cookie, readSession, seal } from './session.js';
+import { cookie, readSession, seal, unseal, equalSecret } from './session.js';
 import { unlockIdentity } from './unlock-guard.js';
 import { DiagnosticLog, errorDetails } from './diagnostics.js';
 export { DoorPreferences } from './preferences.js';
@@ -38,10 +38,19 @@ function allowedPhones(env) {
   return phones.every(v=>/^1\d{10}$/.test(v)) ? [...new Set(phones)] : [];
 }
 const ACCESS_MS = 90 * 86400000;
+async function shortcutStore(env, phone, value) {
+  if (!env.DOOR_PREFERENCES) throw new ApiError('快捷指令绑定存储尚未配置',503);
+  const stub = env.DOOR_PREFERENCES.get(env.DOOR_PREFERENCES.idFromName(phone));
+  const response = await stub.fetch(new Request('https://preferences.internal/shortcut', value === undefined ? {} : {method:'POST',body:JSON.stringify(value)}));
+  if (!response.ok) throw new ApiError('快捷指令绑定存储不可用',503);
+  return response.json();
+}
 const methods = { '/api/status': 'GET', '/api/unlock': 'POST', '/api/sms': 'POST', '/api/login': 'POST', '/api/doors': 'GET', '/api/open': 'POST', '/api/logout': 'POST', '/api/preferences':'POST', '/api/open-selected':'POST' };
+Object.assign(methods, {'/api/shortcut/status':'GET','/api/shortcut/bind':'POST','/api/shortcut/revoke':'POST','/api/shortcut/open-selected':'POST'});
 export function createWorker(transport = defaultTransport) {
   return { async fetch(request, env) {
     const url = new URL(request.url);
+    const shortcutRequest = url.pathname === '/api/shortcut/open-selected';
     if (!url.pathname.startsWith('/api/')) {
       const response = await env.ASSETS.fetch(request);
       const headers = new Headers(response.headers);
@@ -50,17 +59,20 @@ export function createWorker(transport = defaultTransport) {
     }
     const requestId = randomUUID(), started = Date.now();
     const diagnostics = new DiagnosticLog(requestId,Object.values(env).filter(v=>typeof v==='string'));
-    let stored = configured(env) ? readSession(request, env.SESSION_KEY, true) : null;
-    if (stored?.phone && !allowedPhones(env).includes(stored.phone)) stored = null;
+    let stored = configured(env) && !shortcutRequest ? readSession(request, env.SESSION_KEY, true) : null;
+    let loginObservation = stored?.exp <= Date.now() ? {reason:'access_expired',message:'网页访问期限已到期；亲邻登录是否仍有效尚未验证'} : !stored ? {reason:'cookie_unavailable',message:'未收到可解密的网页会话：可能是 Cookie 被清除、未发送或加密密钥改变，无法进一步确定'} : null;
+    if (stored?.phone && !allowedPhones(env).includes(stored.phone)) { stored = null; loginObservation = {reason:'account_removed',message:'当前账号已不在家庭白名单'}; }
     // Legacy cookies have no account binding; require a fresh SMS login once.
     if (stored?.sessionId && !stored.phone) stored = {...stored,sessionId:undefined};
     let session = stored?.exp > Date.now() ? stored : null, checkingUpstreamSession = false;
     diagnostics.protect(stored?.sessionId,stored?.deviceId,stored?.phone);
     diagnostics.add('api.start',{operation:url.pathname,colo:request.cf?.colo});
     const reply = (data, status = 200, setCookie) => {
+      if (shortcutRequest && data.error) data = {...data,message:data.error};
       diagnostics.add('api.complete',{operation:url.pathname,status,elapsedMs:Date.now()-started});
-      const refreshedCookie = status < 400 && stored ? cookie(seal(stored,env.SESSION_KEY)) : undefined;
-      const result = json({...data,requestId,...(session?{diagnostics:diagnostics.snapshot()}: {})},status,setCookie ?? refreshedCookie);
+      const refreshedCookie = !shortcutRequest && status < 400 && stored ? cookie(seal(stored,env.SESSION_KEY)) : undefined;
+      const loginInfo = !shortcutRequest ? {observedAt:Date.now(),loginId:stored?.loginId ?? null,loggedInAt:stored?.loggedInAt ?? null,accessExpiresAt:stored?.exp ?? null,loggedIn:Boolean(session?.sessionId),...(loginObservation ?? stored?.loginFailure ?? {})} : undefined;
+      const result = json({...data,requestId,...(loginInfo ? {loginInfo} : {}),...(session && !shortcutRequest?{diagnostics:diagnostics.snapshot()}: {})},status,shortcutRequest ? undefined : setCookie ?? refreshedCookie);
       result.headers.set('X-Request-ID',requestId);
       return result;
     };
@@ -70,7 +82,7 @@ export function createWorker(transport = defaultTransport) {
     if (!configured(env)) return reply({error: '服务尚未配置完成，请检查 Secrets 与限流绑定'}, 503);
     try {
       if (request.method === 'POST') {
-        if (request.headers.get('Origin') !== url.origin || request.headers.get('X-Qinlin-Request') !== '1') {
+        if (!shortcutRequest && (request.headers.get('Origin') !== url.origin || request.headers.get('X-Qinlin-Request') !== '1')) {
           throw new ApiError('请求来源不允许', 403);
         }
         if (!request.headers.get('Content-Type')?.startsWith('application/json')) throw new ApiError('仅接受 JSON 请求', 415);
@@ -83,6 +95,17 @@ export function createWorker(transport = defaultTransport) {
       }
       const { success } = await env.API_LIMIT.limit({key: rateKey});
       if (!success) throw new ApiError('操作过于频繁，请稍后再试', 429);
+      if (shortcutRequest) {
+        const token = request.headers.get('Authorization')?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+        const binding = unseal(token,env.SESSION_KEY);
+        if (binding?.purpose !== 'shortcut' || !allowedPhones(env).includes(binding.phone)) throw new ApiError('绑定无效或已过期，请在网页重新绑定',401);
+        const saved = await shortcutStore(env,binding.phone);
+        if (!saved?.id || !equalSecret(saved.id,binding.id)) throw new ApiError('绑定已撤销，请在网页重新绑定',401);
+        session = unseal(saved.session,env.SESSION_KEY);
+        if (!session?.sessionId || session.phone !== binding.phone) throw new ApiError('登录已失效，请在网页重新登录并绑定',401);
+        if (!(await env.API_LIMIT.limit({key:`account:${session.phone}`})).success) throw new ApiError('操作过于频繁，请稍后再试',429);
+        diagnostics.protect(session.sessionId,session.phone,session.deviceId,token);
+      }
       if (url.pathname === '/api/status') return reply({ unlocked: Boolean(session), loggedIn: Boolean(session?.sessionId), openEnabled: env.OPEN_ENABLED === 'true', ...(!session ? {turnstileSitekey:env.TURNSTILE_SITEKEY} : {}) });
       let body = {};
       if (request.method === 'POST') {
@@ -109,9 +132,10 @@ export function createWorker(transport = defaultTransport) {
         }
         session = {...stored,deviceId: stored?.deviceId ?? randomUUID().replaceAll('-', '').slice(0,16), exp: Date.now() + ACCESS_MS};
         stored = session;
+        loginObservation = null;
         return reply({ok: true}, 200, cookie(seal(session, env.SESSION_KEY)));
       }
-      if (url.pathname === '/api/logout') return reply({ok: true}, 200, cookie('', 0));
+      if (url.pathname === '/api/logout') { loginObservation = {reason:'logout',message:'主动退出本浏览器会话'}; return reply({ok: true}, 200, cookie('', 0)); }
       if (!session) throw new ApiError('请先解锁测试页面', 401);
       const api = new QinlinApi(env, session.deviceId, transport, diagnostics);
       if (url.pathname === '/api/sms' || url.pathname === '/api/login') {
@@ -122,10 +146,38 @@ export function createWorker(transport = defaultTransport) {
         }
         if (typeof body.code !== 'string' || !/^\d{1,8}$/.test(body.code)) throw new ApiError('请输入有效验证码', 400);
         const sessionId = await api.login(body.phone, body.code);
-        session = stored = {...session, phone:body.phone, sessionId};
+        session = stored = {...session, phone:body.phone, sessionId,loginId:randomUUID(),loggedInAt:Date.now(),exp:Date.now()+ACCESS_MS,loginFailure:undefined};
+        if (env.DOOR_PREFERENCES) {
+          const stub = env.DOOR_PREFERENCES.get(env.DOOR_PREFERENCES.idFromName(session.phone));
+          const refreshed = await stub.fetch(new Request('https://preferences.internal/shortcut/refresh',{
+            method:'POST',body:JSON.stringify({session:seal(session,env.SESSION_KEY)})
+          }));
+          if (!refreshed.ok) throw new ApiError('快捷指令会话更新失败，请重新登录',503);
+        }
+        loginObservation = null;
         return reply({ok: true}, 200, cookie(seal(session, env.SESSION_KEY)));
       }
-      if (!session.sessionId) throw new ApiError('请先登录亲邻账号', 401);
+      if (url.pathname === '/api/shortcut/status') {
+        if (!session.phone) throw new ApiError('请先登录亲邻账号',401);
+        const saved = await shortcutStore(env,session.phone);
+        return reply({bound:Boolean(saved?.id && saved.exp > Date.now() && unseal(saved.session,env.SESSION_KEY)?.sessionId),expiresAt:saved?.exp ?? null});
+      }
+      if (url.pathname === '/api/shortcut/revoke') {
+        if (!session.phone) throw new ApiError('请先登录亲邻账号',401);
+        await shortcutStore(env,session.phone,null);
+        return reply({ok:true});
+      }
+      if (url.pathname === '/api/shortcut/bind') {
+        if (!session.sessionId) throw new ApiError('请先登录亲邻账号',401);
+        checkingUpstreamSession = true;
+        await api.doors(session.sessionId);
+        const selected = await preferences(env,session.phone);
+        if (!selected.selectedIds.length) throw new ApiError('请先在首页勾选要开启的门',400);
+        const id = randomUUID(), exp = Math.min(session.exp,Date.now()+ACCESS_MS);
+        await shortcutStore(env,session.phone,{id,exp,session:seal({...session,exp},env.SESSION_KEY)});
+        return reply({token:seal({purpose:'shortcut',phone:session.phone,id,exp},env.SESSION_KEY),expiresAt:exp});
+      }
+      if (!session.sessionId) throw new ApiError('请先登录亲邻账号',401);
       if (url.pathname === '/api/preferences') {
         const selection = typeof body.stableId === 'string' && body.stableId.length > 0 && body.stableId.length <= 200 && typeof body.selected === 'boolean';
         const toggle = typeof body.autoOpen === 'boolean';
@@ -140,26 +192,29 @@ export function createWorker(transport = defaultTransport) {
       }
       checkingUpstreamSession = true;
       if (url.pathname === '/api/doors') return reply({doors: await api.doors(session.sessionId), preferences:await preferences(env,session.phone)});
-      if (url.pathname === '/api/open-selected') {
+      if (url.pathname === '/api/open-selected' || shortcutRequest) {
         if (env.OPEN_ENABLED !== 'true') throw new ApiError('真实开门尚未启用',403);
         const saved = await preferences(env,session.phone);
-        if (body.automatic === true && !saved.autoOpen) throw new ApiError('自动开门已关闭',403);
+        if (!shortcutRequest && body.automatic === true && !saved.autoOpen) throw new ApiError('自动开门已关闭',403);
         if (!saved.selectedIds.length) throw new ApiError('请先勾选要开启的门',400);
         const keys = await api.doors(session.sessionId);
         const selected = saved.selectedIds.map(id=>({id,key:keys.find(k=>k.stableId===id)}));
         if (!selected.some(item=>item.key)) throw new ApiError('已选钥匙均已失效，请重新选择',403);
         if (!(await env.OPEN_LIMIT.limit({key:session.phone})).success) throw new ApiError('请稍后再开门',429);
-        let loginExpired = false;
+        let loginExpired = false, loginError;
         const results = await Promise.all(selected.map(async ({id,key})=>{
           if (!key) return {stableId:id,ok:false,message:'钥匙已失效或不属于当前账号'};
           try { await api.open(session.sessionId,key); return {stableId:id,doorName:key.doorName,ok:true,message:'请求已接受，请现场确认'}; }
           catch(error) {
-            if (error instanceof ApiError && error.status===401) loginExpired = true;
+            if (error instanceof ApiError && error.status===401) { loginExpired = true; loginError = error; }
             return {stableId:id,doorName:key.doorName,ok:false,message:error instanceof ApiError ? error.message : '开门结果未知，请现场确认'};
           }
         }));
-        if (loginExpired) session = stored = {...session,sessionId:undefined};
-        return reply({results,loggedIn:!loginExpired});
+        if (loginExpired) {
+          await shortcutStore(env,session.phone,null);
+          session = stored = {...session,sessionId:undefined,loginFailure:{reason:'upstream_unauthorized',message:'亲邻拒绝登录凭据；具体是到期、其他设备登录或服务端撤销，无法确定',detectedAt:Date.now(),operation:url.pathname,upstreamStatus:loginError?.details?.upstreamStatus ?? null,businessCode:loginError?.details?.businessCode ?? null}};
+        }
+        return reply({results,loggedIn:!loginExpired,message:results.map(r=>`${r.doorName ?? '已选门'}：${r.message}`).join('\n')});
       }
       if (url.pathname === '/api/open') {
         if (env.OPEN_ENABLED !== 'true') throw new ApiError('当前仅验证登录和钥匙，真实开门尚未启用', 403);
@@ -176,7 +231,8 @@ export function createWorker(transport = defaultTransport) {
       diagnostics.add('api.error',{operation:url.pathname,stage:'handler',...errorDetails(error)});
       let setCookie;
       if (status === 401 && checkingUpstreamSession && session?.sessionId) {
-        session = stored = {...session,sessionId:undefined};
+        if (shortcutRequest) await shortcutStore(env,session.phone,null);
+        session = stored = {...session,sessionId:undefined,loginFailure:{reason:'upstream_unauthorized',message:'亲邻拒绝登录凭据；具体是到期、其他设备登录或服务端撤销，无法确定',detectedAt:Date.now(),operation:url.pathname,upstreamStatus:error.details?.upstreamStatus ?? null,businessCode:error.details?.businessCode ?? null}};
         setCookie = cookie(seal(stored,env.SESSION_KEY));
       }
       return reply({error: error instanceof ApiError ? error.message : '服务异常，请查看诊断日志',

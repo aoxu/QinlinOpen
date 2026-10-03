@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>绑定快捷指令 · 亲邻开门</title><link rel="stylesheet" href="/style.css"><script src="/shortcuts.js" type="module"></script></head>
+<body><main>
+<header><h1>绑定快捷指令</h1><a href="/">返回首页</a></header>
+<p>在 iPhone 或 Apple Watch 上运行一次快捷指令，即发送一次「开门已选」请求。每次读取账号当前选择，修改首页勾选后无需重建指令。与首页自动开门开关无关。</p>
+<p id="message" role="status" aria-live="polite">正在检查登录与绑定…</p>
+<section><h2>1. 登录并选择门</h2><p>在同一浏览器的<a href="/">首页</a>完成访问验证、短信登录，勾选要开的门，再返回此页。进入本页和生成绑定均不会开门。</p><ul id="selected-doors"></ul></section>
+<section><h2>2. 生成绑定凭证</h2><p id="binding-status">尚未检查</p><div class="actions"><button id="bind" disabled>生成 / 重新绑定</button><button id="revoke" class="secondary" disabled>撤销绑定</button></div><p>每个账号保留一个绑定，可用于你的 iPhone 和手表。重新绑定会使旧凭证失效；撤销后旧指令不能再发起请求。退出网页不会撤销绑定。有效期不超过 90 天，且不超过本次访问验证到期时间；同一账号重新登录会自动更新仍有效绑定的登录会话，无需修改快捷指令；绑定已撤销或到期时需重新绑定。</p>
+<div id="credentials" hidden><label>请求地址<input id="endpoint" readonly></label><button id="copy-endpoint" class="secondary">复制请求地址</button><label>Authorization 请求头值<textarea id="authorization" readonly rows="5"></textarea></label><button id="copy-authorization" class="secondary">复制请求头值</button><p>凭证仅在生成时显示，离开或刷新页面后无法找回。请勿分享包含凭证的快捷指令或截图；丢失时重新绑定。凭证持有者可以请求开启此账号当前勾选的门。</p></div></section>
+<section><h2>3. 在 iPhone 创建快捷指令</h2><p>带「复制」标记的文本，点一下即可复制，再粘贴到快捷指令中。</p><p id="step-copy-status" role="status" aria-live="polite"></p><ol>
+<li>打开「快捷指令」App，点「+」，命名为「<button type="button" class="copy-inline" data-copy="亲邻开门已选" aria-label="复制 亲邻开门已选">亲邻开门已选 <span aria-hidden="true">复制</span></button>」。</li>
+<li>添加「<button type="button" class="copy-inline" data-copy="URL" aria-label="复制 URL">URL <span aria-hidden="true">复制</span></button>」操作，粘贴上面的请求地址。</li>
+<li>添加「<button type="button" class="copy-inline" data-copy="获取 URL 内容" aria-label="复制 获取 URL 内容">获取 URL 内容 <span aria-hidden="true">复制</span></button>」操作，展开选项，将方法改为 <button type="button" class="copy-inline" data-copy="POST" aria-label="复制 POST">POST <span aria-hidden="true">复制</span></button>。</li>
+<li>在「头部 / 标头」增加 <button type="button" class="copy-inline" data-copy="Authorization" aria-label="复制 Authorization">Authorization <span aria-hidden="true">复制</span></button>，值粘贴上面复制的完整内容（包含 Bearer 和空格）。再增加 <button type="button" class="copy-inline" data-copy="Content-Type" aria-label="复制 Content-Type">Content-Type <span aria-hidden="true">复制</span></button>，值为 <button type="button" class="copy-inline" data-copy="application/json" aria-label="复制 application/json">application/json <span aria-hidden="true">复制</span></button>。</li>
+<li>请求体选择 <button type="button" class="copy-inline" data-copy="JSON" aria-label="复制 JSON">JSON <span aria-hidden="true">复制</span></button>，添加字段 <button type="button" class="copy-inline" data-copy="action" aria-label="复制 action">action <span aria-hidden="true">复制</span></button>，类型「文本」，值为 <button type="button" class="copy-inline" data-copy="open-selected" aria-label="复制 open-selected">open-selected <span aria-hidden="true">复制</span></button>。不要添加自动重试或循环。</li>
+<li>添加「<button type="button" class="copy-inline" data-copy="获取字典值" aria-label="复制 获取字典值">获取字典值 <span aria-hidden="true">复制</span></button>」操作，键填写 <button type="button" class="copy-inline" data-copy="message" aria-label="复制 message">message <span aria-hidden="true">复制</span></button>，输入选用「<button type="button" class="copy-inline" data-copy="获取 URL 内容" aria-label="复制 获取 URL 内容">获取 URL 内容 <span aria-hidden="true">复制</span></button>」的结果；添加「<button type="button" class="copy-inline" data-copy="显示内容" aria-label="复制 显示内容">显示内容 <span aria-hidden="true">复制</span></button>」操作，显示该字典值。</li>
+<li>在门旁先运行一次。首次联网若出现授权提示，请允许连接当前网站。观察每扇门的结果，并现场确认实体门是否打开。</li>
+</ol><p>接口失败时返回的 message 会说明原因。批量请求可能部分成功；遇到超时，先观察门的实际状态，不要立即重复执行。</p></section>
+<section><h2>4. 在 Apple Watch 上运行</h2><ol><li>在 iPhone 的指令详情中开启「在 Apple Watch 上显示」。</li><li>等待同步后，在手表「快捷指令」App 中运行「<button type="button" class="copy-inline" data-copy="亲邻开门已选" aria-label="复制 亲邻开门已选">亲邻开门已选 <span aria-hidden="true">复制</span></button>」。也可在支持的表盘添加快捷指令复杂功能。</li><li>站在门旁验证；手表需有可用网络。iPhone 成功不代表手表已经验证成功。</li></ol><p>如指令不显示或操作无法运行，请检查同步、系统版本及操作兼容性；不要用「打开网页」替代上述请求。</p><p>操作参考：<a href="https://support.apple.com/zh-cn/guide/watch/apd99050d435/watchos" target="_blank" rel="noreferrer">Apple：在 Apple Watch 上使用快捷指令</a>。具体菜单名称可能因系统版本不同而变化，手表兼容性需实测。</p></section>
+<section><h2>失败时怎么办</h2><p>绑定过期、撤销或登录失效：回首页完成访问验证与登录，再重新绑定并更新指令。没有已选门：回首页勾选。操作过于频繁：稍后再手动运行。服务端接受请求仅代表请求已接受，不证明门已打开。</p></section>
+<p>配置参考：<a href="https://support.apple.com/zh-cn/guide/shortcuts/apd58d46713f/ios" target="_blank" rel="noreferrer">Apple：提出第一个 API 请求</a>。</p>
+</main></body></html>

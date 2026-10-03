@@ -36,3 +36,10 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:400px;overflow:auto;b
 #diagnostics p{font-size:13px}
 .clipboard-fallback{position:fixed;left:-9999px;top:0}
 [hidden]{display:none!important}
+textarea{width:100%;padding:12px;margin-top:6px;border:1px solid #bccdc4;border-radius:9px;font:inherit;overflow-wrap:anywhere}
+li{line-height:1.7;margin-bottom:10px}
+a{color:#176950;overflow-wrap:anywhere}
+.copy-inline{display:inline;min-height:44px;padding:5px 8px;background:#e9f0ec;color:#176950;font-weight:600;overflow-wrap:anywhere;text-align:left}
+.copy-inline span{font-size:11px;font-weight:400;margin-left:4px}
+#step-copy-status{position:sticky;top:8px;background:#e4ece7;padding:8px;border-radius:9px;z-index:1}
+#step-copy-status:empty{display:none}
