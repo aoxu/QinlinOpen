@@ -1,31 +1,35 @@
-# 访问验证加固验收
+# 访问验证加固验收模板
 
-时间：2026-09-30 23:40 GMT+8。
+本文为通用验收清单，不包含个人实例信息，也不代表任一部署已通过验收。实际结果请保存在本地私有记录中，勿提交部署地址、版本 UUID、账号标识或凭据。
 
-## 部署证据
+## 本地验证
 
-- 地址：https://your-app.example.com/
-- 最终部署版本：`EXAMPLE_DEPLOYMENT_VERSION`（Wrangler deploy 输出）。
-- 构建标识：`web-unlock-guard-v6`。
-- 控制台已确认 `TURNSTILE_SECRET` 作为生产加密密钥保存；不在代码或报告中保留其值。
-- 部署包含 `UNLOCK_LIMIT`、`VERIFY_LIMIT` 和 `UNLOCK_GUARD` 绑定及 v2 SQLite DO migration。
+在 web 目录执行并记录实际结果：
 
-## 已通过
+```sh
+npm test
+npm run test:runtime
+npm run deploy:dry
+```
 
-- 32 项 Node 测试；前端 SDK/DOM 同名兼容问题修复后另通过针对性回归测试。
-- 原生 workerd/Miniflare：加密会话、模拟登录/开门、Siteverify 模拟令牌重放拒绝、5 次失败持久冷却、冷却期间不请求 Siteverify。
-- 部署预检与实际部署成功。
-- 线上匿名 `/api/status` 返回 200，未解锁且带公开 sitekey。
-- 缺少令牌返回 403；伪造令牌经线上 Siteverify 拒绝后返回 403。
-- `node --use-env-proxy scripts/security-smoke.mjs`：连续 7 次无令牌请求，第 7 次返回 429、Retry-After:60，未发放 Cookie。配置为每分钟 5 次，Cloudflare 限流最终一致，短暂超额不代表严格次数承诺。
-- 所有测试均未请求真实短信或真实开门。
+测试使用虚构账号和模拟上游。本地通过不代表生产验证码、短信或实体门已验证。
 
-## 尚未通过的真实浏览器验收
+## 自有部署验证
 
-自动化内置浏览器无法加载 challenges.cloudflare.com 验证码脚本；Edge 自动化访问报告 `net::ERR_BLOCKED_BY_CLIENT`。尚未确认真实浏览器取得生产令牌后的成功密码解锁和真实令牌重放拒绝，已请求用户以正常浏览器/无痕窗口验收。不能将模拟 Siteverify 的测试当作生产真人验证成功。
+- 替换 wrangler.jsonc 中的通用主机名与 Turnstile sitekey；通过 Worker Secrets 设置敏感配置。
+- 确认部署包含 UNLOCK_LIMIT、VERIFY_LIMIT、UNLOCK_GUARD 绑定及相应 migration。
+- 用自己的 HTTPS 根地址执行以下命令，示例地址需替换：
+
+```sh
+node --use-env-proxy scripts/security-smoke.mjs https://your-app.example.com
+```
+
+- 检查匿名状态、缺少验证码令牌时拒绝解锁、限流响应和未发放 Cookie。脚本不发送短信或请求开门。
+- 在正常浏览器中验证真人验证码、正确密码解锁及令牌重放拒绝，单独记录结果。
+- 在本人获授权的设备和门旁分别验收短信登录、快捷指令和实体门动作；服务端成功响应不能证明实体门已打开。
 
 ## 保护边界
 
-用户选择保留 workers.dev，仅应用层加固。所有 API 请求先进入 Worker，拒绝请求仍消耗 Workers 请求额度。验证码和限流保护密码猜测及后续调用，无法保证免费额度不被分布式流量耗尽；冷却状态按 HMAC(IP) 隔离，换 IP 可获得另一组计数，共享 IP 的用户也会共用冷却。
+应用层拒绝的请求仍进入 Worker。源码中的验证码、限流和冷却机制不构成免费额度保障；共享 IP 会共用冷却状态。
 
-来源：本次源码、控制台、部署及测试输出；Cloudflare 限流官方文档：https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/ 。
+来源：[worker.js](src/worker.js)、[unlock-guard.js](src/unlock-guard.js)、[验证脚本](scripts/security-smoke.mjs)；平台行为参考 [Cloudflare 限流文档](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)。

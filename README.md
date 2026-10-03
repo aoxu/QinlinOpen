@@ -4,7 +4,7 @@
 
 ## 网页版 🌐
 
-网页版由静态网页、Cloudflare Workers 同域代理和 Durable Objects 组成，无需安装 Android App，可在手机或电脑浏览器使用。部署配置中的 HTTPS 地址为 [亲邻开门网页版](https://your-app.example.com/)，访问需要部署者提供的访问密码，短信登录仅接受配置的家庭手机号白名单。
+网页版由静态网页、Cloudflare Workers 同域代理和 Durable Objects 组成，无需安装 Android App，可在手机或电脑浏览器使用。部署后使用部署者提供的 HTTPS 地址（通用示例：`https://your-app.example.com/`），访问需要部署者提供的访问密码，短信登录仅接受配置的家庭手机号白名单。
 
 ### 功能与使用
 

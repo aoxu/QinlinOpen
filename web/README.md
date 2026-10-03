@@ -29,6 +29,16 @@ npm run dev
 
 ## Cloudflare 部署（单独执行）
 
+仓库配置为通用示例，不包含维护者的部署地址或 Turnstile 站点标识。部署前将 `wrangler.jsonc` 中的 `name`、`TURNSTILE_HOSTNAMES` 和 `TURNSTILE_SITEKEY` 改为你自己的配置；主机名填写实际访问域名，不包含协议或路径。占位值不能用于实际安全验证。个人配置请保存在本机，发布代码前恢复通用示例。
+
+验证自己的部署时，显式传入目标 HTTPS 根地址（示例地址需替换）：
+
+```sh
+node --use-env-proxy scripts/security-smoke.mjs https://your-app.example.com
+```
+
+此脚本会向指定部署发送匿名状态请求和错误密码验证请求，用于检查限流。
+
 ```sh
 npx wrangler login
 npm run deploy
