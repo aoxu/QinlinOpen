@@ -9,6 +9,7 @@
 <section id="keys" aria-label="门禁钥匙" hidden><div id="doors"></div></section>
 <p id="message" role="status" aria-live="polite">正在检查会话…</p>
 <ul id="batch-results" aria-live="polite"></ul>
-<section id="settings" hidden><h2>设置</h2><label class="toggle"><input id="auto-open" type="checkbox" role="switch">进入页面自动开门已选</label><p>默认关闭。开启后，每次加载或刷新网页自动发送一次已选门的开门请求；切回已有页面或刷新钥匙列表不会触发。选择和设置按账号保存在服务器。</p></section>
+<details id="login-history"><summary>🕒 登录记录</summary><p id="login-history-storage"></p><button id="copy-login-history" type="button" class="secondary">复制登录记录</button><p id="login-history-copy-status" role="status"></p><pre id="login-history-output" tabindex="0"></pre></details>
+<section id="settings" hidden><h2>设置</h2><p><a href="/shortcuts.html">⌚ 绑定 iPhone / Apple Watch 快捷指令</a></p><label class="toggle"><input id="auto-open" type="checkbox" role="switch">进入页面自动开门已选</label><p>默认关闭。开启后，每次加载或刷新网页自动发送一次已选门的开门请求；切回已有页面或刷新钥匙列表不会触发。选择和设置按账号保存在服务器。</p></section>
 <details id="tools"><summary>日志与设置</summary><section id="diagnostics"><div class="actions"><h2>最近诊断日志</h2><button id="copy-logs" type="button" class="secondary">复制最近日志</button></div><p>最近 80 条脱敏日志，刷新后保留。</p><p id="copy-status" role="status" aria-live="polite"></p><details id="log-details"><summary>查看日志</summary><pre id="log-output" tabindex="0"></pre></details><button id="clear-logs" type="button" class="secondary">清空日志</button></section><button id="logout" class="secondary" hidden>退出登录</button></details>
 </main></body></html>

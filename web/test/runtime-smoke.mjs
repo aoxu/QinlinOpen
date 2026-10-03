@@ -62,10 +62,20 @@ try {
   await call('preferences',{autoOpen:true});
   assert.deepEqual((await call('doors')).preferences,{selectedIds:['1:2'],autoOpen:true});
   assert.equal((await call('open-selected',{automatic:true})).results[0].ok,true);
+  const binding=await call('shortcut/bind',{});
+  const shortcut=()=>mf.dispatchFetch('https://runtime.example/api/shortcut/open-selected',{
+    method:'POST',headers:{Authorization:'Bearer '+binding.token,'Content-Type':'application/json'},body:JSON.stringify({action:'open-selected'})
+  });
+  const opened=await shortcut();
+  assert.equal(opened.status,200,await opened.clone().text());
+  assert.equal(opened.headers.has('Set-Cookie'),false);
+  assert.equal((await opened.json()).results[0].ok,true);
+  await call('shortcut/revoke',{});
+  assert.equal((await shortcut()).status,401);
   await call('logout',{});
   assert.equal((await call('status')).loggedIn,false);
   assert.ok(outgoing.includes('/member/sms/sendSecurityCode'));
-  assert.equal(outgoing.filter(p=>p.includes('/open/doorcontrol/')).length,2);
+  assert.equal(outgoing.filter(p=>p.includes('/open/doorcontrol/')).length,3);
   async function rejectedUnlock(token,expectedStatus) {
     const response=await mf.dispatchFetch('https://runtime.example/api/unlock',{
       method:'POST',headers:{Origin:'https://runtime.example','Content-Type':'application/json','X-Qinlin-Request':'1'},
